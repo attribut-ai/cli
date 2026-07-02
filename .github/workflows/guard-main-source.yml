@@ -1,0 +1,24 @@
+name: Guard main source
+
+# Enforces that PRs into main only come from dev (normal flow) or hotfix/* (emergencies).
+# Wire this job in as a required status check on the main branch protection rule.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify-source:
+    name: verify-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR originates from dev or hotfix/*
+        env:
+          HEAD: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD" = "dev" ] || case "$HEAD" in hotfix/*) true;; *) false;; esac; then
+            echo "OK: PR into main from '$HEAD'."
+          else
+            echo "::error::PRs into main must come from 'dev' or a 'hotfix/*' branch (got '$HEAD')."
+            exit 1
+          fi
