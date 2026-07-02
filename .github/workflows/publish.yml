@@ -36,5 +36,6 @@ jobs:
       # sub-second, so concurrency buys nothing and serialization is deterministic.
       - run: node --test --test-concurrency=1
       - name: Stamp build SHA
-        run: printf "module.exports = { GIT_SHA: '%s' };\n" "$GITHUB_SHA" > src/version.cjs
+        run: |
+          printf "module.exports = { GIT_SHA: '%s' };\n" "$GITHUB_SHA" > src/version.cjs
       - run: npm publish --provenance --access public
