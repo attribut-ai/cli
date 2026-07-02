@@ -1,0 +1,26 @@
+# Build/test gate for `attribut`. Runs the node:test suite on every PR into
+# main (and on main pushes) so a green `test` check can be required by branch
+# protection before merge. This repo has no Cloud Build / App Hosting rollout,
+# so this workflow IS the deploy-equivalent success signal.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20 # engines >=18; 20 has prebuilt better-sqlite3 binaries
+          cache: npm
+      - run: npm ci
+      - run: npm test
