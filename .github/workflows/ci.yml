@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 20 # engines >=18; 20 has prebuilt better-sqlite3 binaries
+          node-version: 22 # LTS; node --test glob expansion needs >=21, plus prebuilt better-sqlite3
           cache: npm
       - run: npm ci
       - run: npm test
