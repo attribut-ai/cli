@@ -262,7 +262,7 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: cap(repo, CAP_PATH),
+    repo: repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...shaSet],
     num_turns: numTurns,

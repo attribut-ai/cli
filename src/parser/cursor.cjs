@@ -392,7 +392,7 @@ function parseCursorSession(extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: cap(extra.repo || null, CAP_PATH),
+    repo: extra.repo || null,   // UNBOUNDED: full cwd/path (folder->org attribution)
     branch: cap(extra.branch || null, CAP_PATH),
     commitSHA: [],
     num_turns: numTurns,
