@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"bbbb1111-2222-3333-4444-555555555555","cwd":"/Users/test/repo","timestamp":"2026-06-15T12:00:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}}

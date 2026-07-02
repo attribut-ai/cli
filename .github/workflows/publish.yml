@@ -1,0 +1,40 @@
+# Publish `attribut` to npm via OIDC Trusted Publishing — no tokens stored.
+#
+# Trigger: pushing a version tag (v0.1.1 etc.), NOT every main commit — doc
+# typos shouldn't cut releases. Flow: bump package.json version, commit,
+# `git tag vX.Y.Z && git push --tags`.
+#
+# Requires the one-time npmjs.com setup: package `attribut` → Settings →
+# Trusted Publisher → GitHub: attribut-ai/cli, workflow publish.yml.
+# `id-token: write` lets npm verify this exact repo+workflow via OIDC and
+# attach provenance attestations (the "built from attribut-ai/cli" badge).
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # OIDC — required for trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24 # npm ≥11.5 required for trusted publishing
+          registry-url: https://registry.npmjs.org
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_V="v$(node -p "require('./package.json').version")"
+          [ "$PKG_V" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != package.json $PKG_V"; exit 1; }
+      # Serialized: the node:test parallel-file runner has an IPC flake
+      # ("Unable to deserialize cloned data") on some Node versions. The suite is
+      # sub-second, so concurrency buys nothing and serialization is deterministic.
+      - run: node --test --test-concurrency=1
+      - name: Stamp build SHA
+        run: printf "module.exports = { GIT_SHA: '%s' };\n" "$GITHUB_SHA" > src/version.cjs
+      - run: npm publish --provenance --access public

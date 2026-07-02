@@ -1,0 +1,28 @@
+{
+  "name": "attribut",
+  "version": "0.5.0",
+  "description": "ATTRIBUT thin allowlist telemetry collector for Claude Code — extracts only safe, signal-bearing fields (never prompt/response/code/diff text) and POSTs them to ingest.",
+  "bin": {
+    "attribut": "src/collector.cjs"
+  },
+  "main": "src/collector.cjs",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.cjs\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "license": "PolyForm-Shield-1.0.0"
+}
