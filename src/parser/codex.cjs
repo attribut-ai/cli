@@ -337,7 +337,7 @@ function parseCodexRollout(rolloutPath, extra = {}) {
     started_at: tMin !== null ? new Date(tMin).toISOString() : null,
     ended_at: tMax !== null ? new Date(tMax).toISOString() : null,
     duration_ms: tMin !== null && tMax !== null ? tMax - tMin : null,
-    repo: cap(extra.repo || repo, CAP_PATH),
+    repo: extra.repo || repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...mergedShas],
     num_turns: numTurns,
