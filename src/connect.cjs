@@ -37,6 +37,7 @@ const { URL } = require('url');
 
 const { getOrCreateDeviceUuid } = require('./device.cjs');
 const installer = require('./install.cjs');
+const timer = require('./timer.cjs');
 const { version: PKG_VERSION } = require('../package.json');
 
 const DEFAULT_APP_BASE = 'https://attribut.ai';
@@ -375,6 +376,10 @@ async function runConnect(argv) {
     await emitConnected({ agent: cfg.agent, token: cfg.token, ingestBase, deviceUuid, hostname });
   }
 
+  // 6) Install the hourly heartbeat timer (best-effort — see timer.cjs). Runs
+  // once per connect, not per agent: it's a device-level liveness signal.
+  timer.installTimer();
+
   out('');
   out(`✓ Connection established for: ${connected.map((c) => c.agent).join(', ')}`);
   out('  (Restart any running sessions to pick up the hook.)');
@@ -409,6 +414,7 @@ async function runTokenConnect(opts) {
     deviceUuid: getOrCreateDeviceUuid(),
     hostname: os.hostname(),
   });
+  timer.installTimer();
   out(`✓ Connection established for: ${agent}`);
   return 0;
 }
