@@ -114,7 +114,9 @@
                   "cache_creation_tokens": { "type": ["integer", "null"], "minimum": 0 },
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
-                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+                  "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
               }
             }
@@ -204,7 +206,9 @@
                   "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
-                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+                  "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
               }
             }
@@ -293,7 +297,9 @@
                   "cache_creation_tokens": { "type": ["integer", "null"], "minimum": 0 },
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
-                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+                  "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
               }
             }
@@ -378,7 +384,9 @@
                   "lines_removed": { "type": ["integer", "null"], "minimum": 0 },
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
-                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+                  "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
               }
             }
