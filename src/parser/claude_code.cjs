@@ -452,6 +452,11 @@ function subagentsFromFiles(transcriptPath, sessionId) {
         ended_at: p.ended_at,
         duration_ms: p.duration_ms,
         tool_uses: p.tool_uses || [],
+        // Worker workers commit in their own (often worktree-isolated) checkout;
+        // those SHAs/branch are NEVER observed in the parent transcript. Keep them
+        // on the subagent record so the session-level union below can recover them.
+        commit_shas: Array.isArray(p.commitSHA) ? p.commitSHA : [],
+        branch: p.branch,
       });
     }
     return out;
@@ -636,6 +641,26 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
     cacheRead += sa.cache_read_tokens || 0;
   }
 
+  // Union subagent-observed commit SHAs into the session-level commitSHA. Worker
+  // commits (often in worktree-isolated checkouts) never appear in the parent
+  // transcript, so without this they are lost to attribution. PREPEND them, before
+  // the parent-observed SHAs: ingest derives the primary git_commit_id from
+  // commitSHA[-1] (the session's landed commit), so a subagent SHA must never
+  // displace the parent's most-recent commit as primary. Dedup preserves order and
+  // keeps the parent SHAs' relative order (and thus the primary) intact.
+  const parentShas = [...shaSet];
+  const subagentShas = [];
+  const seenShas = new Set(parentShas);
+  for (const sa of subagents) {
+    for (const sha of sa.commit_shas || []) {
+      if (typeof sha === 'string' && sha && !seenShas.has(sha)) {
+        seenShas.add(sha);
+        subagentShas.push(sha);
+      }
+    }
+  }
+  const commitSHA = subagentShas.length ? [...subagentShas, ...parentShas] : parentShas;
+
   const tool_uses = [...toolUseCounts.entries()].map(([name, count]) => ({
     name,
     count,
@@ -657,7 +682,7 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
     duration_ms: durationMs,
     repo: extra.repo || repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
-    commitSHA: [...shaSet],
+    commitSHA,
     num_turns: numTurns,
     num_tool_calls,
     tool_uses,

@@ -29,6 +29,17 @@ function assistantRow(ts, usage, toolName) {
   });
 }
 
+// A user row whose toolUseResult is a `git commit` stdout — the SHA + branch land
+// in the `[branch sha]` bracket line the parser scrapes from stdout.
+function gitCommitRow(ts, branch, sha) {
+  return JSON.stringify({
+    type: 'user',
+    sessionId: SID,
+    timestamp: ts,
+    toolUseResult: { stdout: `[${branch} ${sha}] subject\n 1 file changed, 2 insertions(+)` },
+  });
+}
+
 // Build a temp ~/.claude/projects-style tree. Returns { parentPath, cleanup }.
 function buildTree({ workers }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-subs-'));
@@ -124,6 +135,77 @@ test('duplicate worker copies: the LARGEST (complete) transcript wins, not first
     assert.strictEqual(p.claude_code.subagents[0].output_tokens, 18000);
   } finally {
     cleanup();
+  }
+});
+
+test('subagent commit SHAs + branch are kept and unioned into session commitSHA', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-subs-'));
+  const proj = path.join(root, 'projects', '-Users-test-repo');
+  const subDir = path.join(proj, SID, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+
+  // Parent commits once on `main` (a SHA the parent DOES observe), then dispatches
+  // an Agent worker that commits twice on its own worktree branch (SHAs the parent
+  // transcript never sees).
+  const parentSha = 'aaaaaaa';
+  const subSha1 = 'bbbbbbb';
+  const subSha2 = 'ccccccc';
+  fs.writeFileSync(
+    path.join(proj, `${SID}.jsonl`),
+    assistantRow('2026-06-15T10:00:00.000Z', { input_tokens: 1000, output_tokens: 400 }, 'Agent') + '\n' +
+      gitCommitRow('2026-06-15T10:01:00.000Z', 'main', parentSha) + '\n'
+  );
+  fs.writeFileSync(
+    path.join(subDir, 'agent-worktree-worker-deadbeef0000.jsonl'),
+    assistantRow('2026-06-15T10:05:00.000Z', { input_tokens: 2000, output_tokens: 800 }, 'Bash') + '\n' +
+      gitCommitRow('2026-06-15T10:06:00.000Z', 'feat/x', subSha1) + '\n' +
+      gitCommitRow('2026-06-15T10:07:00.000Z', 'feat/x', subSha2) + '\n'
+  );
+
+  try {
+    const p = parser.parseClaudeCodeTranscript(path.join(proj, `${SID}.jsonl`), { sessionId: SID });
+    const s = p.claude_code.subagents[0];
+    // 1) The per-subagent struct KEEPS its SHAs + branch (previously dropped).
+    assert.deepStrictEqual(s.commit_shas, [subSha1, subSha2], 'worker SHAs kept on struct');
+    assert.strictEqual(s.branch, 'feat/x', 'worker branch kept on struct');
+    // 2) Session commitSHA is the deduped union: subagent SHAs PREPENDED, parent last.
+    assert.deepStrictEqual(p.commitSHA, [subSha1, subSha2, parentSha]);
+    // 3) Primary git_commit_id semantics: the parent's most-recent SHA stays LAST,
+    //    so ingest's commitSHA[-1] never becomes a subagent SHA when the parent has one.
+    assert.strictEqual(p.commitSHA[p.commitSHA.length - 1], parentSha);
+    // 4) Session-level branch is unchanged by the worker's worktree branch.
+    assert.strictEqual(p.branch, 'main');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('union dedups a subagent SHA already observed by the parent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-subs-'));
+  const proj = path.join(root, 'projects', '-Users-test-repo');
+  const subDir = path.join(proj, SID, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+
+  const shared = 'abcdef0';
+  const subOnly = 'fedcba9';
+  fs.writeFileSync(
+    path.join(proj, `${SID}.jsonl`),
+    assistantRow('2026-06-15T10:00:00.000Z', { input_tokens: 10, output_tokens: 5 }, 'Agent') + '\n' +
+      gitCommitRow('2026-06-15T10:01:00.000Z', 'main', shared) + '\n'
+  );
+  fs.writeFileSync(
+    path.join(subDir, 'agent-w-deadbeef0000.jsonl'),
+    assistantRow('2026-06-15T10:05:00.000Z', { input_tokens: 20, output_tokens: 5 }, 'Bash') + '\n' +
+      gitCommitRow('2026-06-15T10:06:00.000Z', 'main', shared) + '\n' +
+      gitCommitRow('2026-06-15T10:07:00.000Z', 'main', subOnly) + '\n'
+  );
+
+  try {
+    const p = parser.parseClaudeCodeTranscript(path.join(proj, `${SID}.jsonl`), { sessionId: SID });
+    // `shared` appears once; only the genuinely-new subagent SHA is prepended.
+    assert.deepStrictEqual(p.commitSHA, [subOnly, shared]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
