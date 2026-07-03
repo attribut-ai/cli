@@ -391,6 +391,44 @@ function listSubagentRollouts(root) {
   return out;
 }
 
+// Walk the sessions tree, returning [{ path, sessionId, mtimeMs }] for EVERY
+// TOP-LEVEL session rollout (subagent children excluded — they are folded into
+// their parent). Reads each file's session_meta (first line) to classify + label
+// it; the sessionId is best-effort (session_meta payload.id) and may be null (the
+// parser re-derives it from content at parse time). Newest-first by mtime. Never
+// throws — used by `attribut backfill` to enumerate history.
+function listSessionRollouts(root = sessionsRoot()) {
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+      } else if (e.isFile() && e.name.endsWith('.jsonl')) {
+        const meta = readSessionMeta(full);
+        // Skip subagent children (thread_source/thread_spawn) — the parent folds them.
+        if (meta && (meta.thread_source === 'subagent' || threadSpawnOf(meta) !== null)) continue;
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(full).mtimeMs;
+        } catch {
+          continue; // vanished between readdir and stat — skip
+        }
+        out.push({ path: full, sessionId: (meta && meta.id) || null, mtimeMs });
+      }
+    }
+  };
+  walk(root);
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out;
+}
+
 // Build the parent's nested subagents[] from the on-disk child rollouts (the
 // separate-file plane). Collects the TRANSITIVE closure rooted at parentSessionId
 // (so a depth-2 subagent whose parent is a depth-1 subagent is included), parses
@@ -517,6 +555,7 @@ module.exports = {
   isCodexSubagentRollout,
   parseCodexRollout,
   buildCodexSubagents,
+  listSessionRollouts,
   resolveRolloutPath,
   sessionsRoot,
   expandHome,

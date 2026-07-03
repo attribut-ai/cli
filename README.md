@@ -89,6 +89,7 @@ src/settings.cjs             read/merge/remove hooks in ~/.claude/settings.json
 src/device.cjs               stable per-machine device_uuid (0600 file)
 src/token.cjs                ingest bearer token at rest (0600 file)
 src/heartbeat.cjs            `attribut heartbeat` — one-off liveness POST
+src/backfill.cjs             `attribut backfill` — import pre-connect local history
 src/machine_id.cjs           stable hardware-derived machine id (0600 file)
 src/state.cjs                local state (last_hook_invocation_at)
 src/timer.cjs                installs/removes the hourly heartbeat OS timer
@@ -154,6 +155,33 @@ liveness signal so ATTRIBUT can tell "the connector stopped firing hooks"
 apart from "this device is gone." Timer install is best-effort: a sandbox
 without a working scheduler backend does not fail `connect` — the hooks (the
 part that matters) are already live.
+
+## Backfill (import pre-connect history)
+
+```sh
+attribut backfill [--agents=a,b] [--since=90d|<ISO>] [--all] [--yes] [--dry-run]
+```
+
+Live capture only sees sessions that happen *after* you connect. Backfill closes
+that gap: it enumerates your **existing** local sessions for each connected tool
+and re-sends them through the exact same envelope-build + POST path live capture
+uses — so the payload shape, contract validation, and metadata-only privacy
+guarantee are identical to a live session (it re-reads the same on-disk
+transcripts/DBs the parsers already know: `~/.claude/projects`, `~/.codex/sessions`,
+Antigravity's per-conversation store, Cursor's `state.vscdb`).
+
+`connect` **offers this automatically** right after it installs hooks (opt-in,
+default yes, interactive terminals only): it shows how many prior sessions it
+found and how far back they go, then lets you pick **last 90 days** (default),
+**all history**, or **skip**. Pass `--no-backfill` to `connect` to suppress the
+offer. Run `attribut backfill` yourself anytime to import a wider/narrower window
+later.
+
+Re-sending is safe: the server reconciles by `sessionId` (*latest non-partial
+wins*), so a session already captured live — or backfilled twice — just overwrites
+in place. It never double-counts. `--dry-run` prints the envelopes it *would* send
+(nothing is posted); a single session's failure is logged and skipped, never
+fatal.
 
 ## Heartbeat (connector liveness signal)
 
