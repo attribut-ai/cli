@@ -223,9 +223,18 @@ test('install then uninstall round-trips on disk, preserving other settings', ()
   const prevEnv = process.env.CLAUDE_SETTINGS_PATH;
   const prevHooks = process.env.ATTRIBUT_HOOKS_DIR;
   const prevConfig = process.env.ATTRIBUT_CONFIG_DIR;
+  // runUninstall's default (no --provider) path also removes the heartbeat
+  // timer (timer.cjs) — sandbox its dirs and skip real OS activation so this
+  // never touches the dev machine's or CI runner's actual scheduler.
+  const prevLaunchd = process.env.ATTRIBUT_LAUNCHD_DIR;
+  const prevSystemd = process.env.ATTRIBUT_SYSTEMD_USER_DIR;
+  const prevSkipTimer = process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION;
   process.env.CLAUDE_SETTINGS_PATH = p;
   process.env.ATTRIBUT_HOOKS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-hooks-'));
   process.env.ATTRIBUT_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-config-'));
+  process.env.ATTRIBUT_LAUNCHD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-launchd-'));
+  process.env.ATTRIBUT_SYSTEMD_USER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-systemd-'));
+  process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
   const tokenFile = path.join(process.env.ATTRIBUT_CONFIG_DIR, 'token');
   try {
     assert.equal(install.runInstall(['--key=tok-xyz']), 0);
@@ -254,6 +263,12 @@ test('install then uninstall round-trips on disk, preserving other settings', ()
     else process.env.ATTRIBUT_HOOKS_DIR = prevHooks;
     if (prevConfig === undefined) delete process.env.ATTRIBUT_CONFIG_DIR;
     else process.env.ATTRIBUT_CONFIG_DIR = prevConfig;
+    if (prevLaunchd === undefined) delete process.env.ATTRIBUT_LAUNCHD_DIR;
+    else process.env.ATTRIBUT_LAUNCHD_DIR = prevLaunchd;
+    if (prevSystemd === undefined) delete process.env.ATTRIBUT_SYSTEMD_USER_DIR;
+    else process.env.ATTRIBUT_SYSTEMD_USER_DIR = prevSystemd;
+    if (prevSkipTimer === undefined) delete process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION;
+    else process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = prevSkipTimer;
   }
 });
 
@@ -266,9 +281,16 @@ test('uninstall removes legacy copied collector files', () => {
   const prevEnv = process.env.CLAUDE_SETTINGS_PATH;
   const prevHooks = process.env.ATTRIBUT_HOOKS_DIR;
   const prevConfig = process.env.ATTRIBUT_CONFIG_DIR;
+  // See the timer.cjs sandboxing note in the round-trip test above.
+  const prevLaunchd = process.env.ATTRIBUT_LAUNCHD_DIR;
+  const prevSystemd = process.env.ATTRIBUT_SYSTEMD_USER_DIR;
+  const prevSkipTimer = process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION;
   process.env.CLAUDE_SETTINGS_PATH = settingsP;
   process.env.ATTRIBUT_HOOKS_DIR = hooksDir;
   process.env.ATTRIBUT_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-config-'));
+  process.env.ATTRIBUT_LAUNCHD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-launchd-'));
+  process.env.ATTRIBUT_SYSTEMD_USER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-systemd-'));
+  process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
   try {
     assert.equal(install.runUninstall([]), 0);
     assert.ok(!fs.existsSync(path.join(hooksDir, 'attribut-collector.cjs')));
@@ -282,6 +304,12 @@ test('uninstall removes legacy copied collector files', () => {
     else process.env.ATTRIBUT_HOOKS_DIR = prevHooks;
     if (prevConfig === undefined) delete process.env.ATTRIBUT_CONFIG_DIR;
     else process.env.ATTRIBUT_CONFIG_DIR = prevConfig;
+    if (prevLaunchd === undefined) delete process.env.ATTRIBUT_LAUNCHD_DIR;
+    else process.env.ATTRIBUT_LAUNCHD_DIR = prevLaunchd;
+    if (prevSystemd === undefined) delete process.env.ATTRIBUT_SYSTEMD_USER_DIR;
+    else process.env.ATTRIBUT_SYSTEMD_USER_DIR = prevSystemd;
+    if (prevSkipTimer === undefined) delete process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION;
+    else process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = prevSkipTimer;
   }
 });
 

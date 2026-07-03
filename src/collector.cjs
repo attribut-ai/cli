@@ -44,6 +44,7 @@ const cursorParser = require('./parser/cursor.cjs');
 const { buildAndValidate } = require('./envelope.cjs');
 const { getOrCreateDeviceUuid, configDir } = require('./device.cjs');
 const { readToken } = require('./token.cjs');
+const { touchHookInvocation } = require('./state.cjs');
 const { version: PKG_VERSION } = require('../package.json');
 const { GIT_SHA } = require('./version.cjs');
 
@@ -659,6 +660,8 @@ Commands:
   install      Register the capture hook in ~/.claude/settings.json (manual token)
                  attribut install --key=<token> [--endpoint=<origin>]
   uninstall    Remove the capture hook (and any legacy collector files)
+  heartbeat    Send a one-off liveness signal (installed hourly by connect)
+                 attribut heartbeat [--dry-run]
   audit        Prove metadata-only on your own data: validate every payload
                against the frozen contract and scan it for content leaks.
                  attribut audit                 sweep ALL local sessions (summary)
@@ -683,6 +686,7 @@ async function main() {
   if (sub === 'install') return require('./install.cjs').runInstall(argv.slice(1));
   if (sub === 'uninstall') return require('./install.cjs').runUninstall(argv.slice(1));
   if (sub === 'connect') return require('./connect.cjs').runConnect(argv.slice(1));
+  if (sub === 'heartbeat') return require('./heartbeat.cjs').runHeartbeat(argv.slice(1));
   if (sub === 'audit') return require('./audit.cjs').runAudit(argv.slice(1));
   if (sub === 'help' || sub === '--help' || sub === '-h') {
     printHelp();
@@ -737,6 +741,12 @@ async function main() {
     log(`could not parse hook JSON from stdin: ${err.message}`);
     return 0;
   }
+
+  // A real hook fired — record it for the heartbeat's last_hook_invocation_at.
+  // Skipped on --dry-run (offline inspection of a hook payload isn't a live
+  // firing and shouldn't feed gap detection). Cheap, best-effort, never
+  // throws — see state.cjs.
+  if (!dryRun) touchHookInvocation();
 
   const trigger = triggerFor(hook.hook_event_name, explicit);
   if (!trigger) {

@@ -22,6 +22,13 @@ process.env.CODEX_CONFIG_PATH = path.join(TMP, 'codex', 'config.toml');
 process.env.ATTRIBUT_ALLOW_INSECURE = '1'; // permit the localhost http server
 process.env.ATTRIBUT_NO_BROWSER = '1'; // never spawn a browser in tests
 process.env.ATTRIBUT_POLL_INTERVAL_MS = '5'; // fast polling
+// runConnect now also installs the heartbeat timer (timer.cjs) on success —
+// sandbox its OS-specific paths into TMP too and skip the real
+// launchctl/systemctl/schtasks activation call so the suite never touches the
+// dev machine's or CI runner's actual scheduler.
+process.env.ATTRIBUT_LAUNCHD_DIR = path.join(TMP, 'LaunchAgents');
+process.env.ATTRIBUT_SYSTEMD_USER_DIR = path.join(TMP, 'systemd-user');
+process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
 fs.mkdirSync(path.dirname(process.env.CLAUDE_SETTINGS_PATH), { recursive: true });
 
 const connect = require('../src/connect.cjs');

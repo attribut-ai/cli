@@ -88,6 +88,10 @@ src/install.cjs              install/uninstall command logic (register-in-place)
 src/settings.cjs             read/merge/remove hooks in ~/.claude/settings.json
 src/device.cjs               stable per-machine device_uuid (0600 file)
 src/token.cjs                ingest bearer token at rest (0600 file)
+src/heartbeat.cjs            `attribut heartbeat` — one-off liveness POST
+src/machine_id.cjs           stable hardware-derived machine id (0600 file)
+src/state.cjs                local state (last_hook_invocation_at)
+src/timer.cjs                installs/removes the hourly heartbeat OS timer
 src/contract/envelope.schema.json  vendored frozen contract schema
 test/                        privacy golden test + happy-path correctness tests
 test/fixtures/synthetic.jsonl synthetic transcript (no real user data)
@@ -145,6 +149,79 @@ Per-agent tokens are stored in `${ATTRIBUT_CONFIG_DIR:-~/.attribut}/token` as a
 from the hook's `--provider` flag. `ATTRIBUT_APP_BASE` overrides the app origin;
 `--endpoint` / `INGEST_BASE` override the ingest origin.
 
+`connect` also installs an **hourly heartbeat timer** (see below) — a small
+liveness signal so ATTRIBUT can tell "the connector stopped firing hooks"
+apart from "this device is gone." Timer install is best-effort: a sandbox
+without a working scheduler backend does not fail `connect` — the hooks (the
+part that matters) are already live.
+
+## Heartbeat (connector liveness signal)
+
+```sh
+attribut heartbeat [--dry-run]
+```
+
+Separate from the hook-triggered `/v1/hook` envelope: a minimal, fire-and-
+forget POST to `${INGEST_BASE:-https://ingest.attribut.ai}/v1/heartbeat` that
+tells the server "this device is still here," even during long stretches with
+no Claude Code / Codex / Cursor / Antigravity session running. `attribut
+connect` installs this to run **hourly** as an OS-native timer:
+
+| OS | mechanism |
+|---|---|
+| macOS | a launchd user LaunchAgent (`~/Library/LaunchAgents/ai.attribut.heartbeat.plist`, `StartInterval=3600`, `RunAtLoad`) |
+| Linux | a systemd `--user` service + timer (`~/.config/systemd/user/attribut-heartbeat.{service,timer}`, `OnUnitActiveSec=1h`, `Persistent=true`) |
+| Windows | a Task Scheduler task (`schtasks /create ... /sc hourly`) |
+
+Each is idempotent (re-running `connect` replaces the same named unit/task in
+place, never stacking duplicates) and invokes the durably-installed
+`collector.cjs` by absolute path — the same register-in-place approach `install`
+uses for hooks, so the timer survives a sparse PATH. If ATTRIBUT is only ever
+run via ephemeral `npx` (no durable global install), the timer instead runs
+`npx -y attribut@latest heartbeat` on each fire.
+
+**Payload** — nothing outside this list is ever sent; no paths, no prompts, no
+content. IP/geo is derived server-side from the request:
+
+| field | meaning |
+|---|---|
+| `kind` | always `"heartbeat"` |
+| `schema_version` | `1` |
+| `sent_at` | ISO 8601 send time |
+| `device_uuid` | same random per-device id the hook envelope carries |
+| `machine_id` | stable, **hashed** hardware id (see below) — not identity |
+| `cli_version` | the installed package's `package.json` version |
+| `platform` | `process.platform` (`darwin` / `linux` / `win32`) |
+| `os_release` | `os.release()` |
+| `source` | `"timer"` — the only value today |
+| `last_hook_invocation_at` | ISO 8601 timestamp of the last real hook fire, or `null` |
+
+**Failure policy is the opposite of `connect`/`install`:** one attempt, a ~5s
+timeout, and exit `0` on *any* send failure — the absence of a heartbeat is
+itself the signal ingest acts on, so local retries would only mask it. The one
+non-zero exit is "no ingest token configured at all" (run `attribut connect`
+first), which makes `attribut heartbeat` useful as a standalone smoke test.
+`--dry-run` prints the payload instead of sending it (works with or without a
+token configured).
+
+### `machine_id`
+
+Distinct from `device_uuid` (which ATTRIBUT itself mints): `machine_id` ties
+back to an id the **OS** hands out — `/etc/machine-id` on Linux, the
+`IOPlatformUUID` from `ioreg` on macOS, the registry `MachineGuid` on Windows —
+so it survives a wiped `~/.attribut` config dir. The raw platform id is
+**never sent**; only its `sha256` hash is, and that hash is itself cached at
+`${ATTRIBUT_CONFIG_DIR:-~/.attribut}/machine_id` (`0600`). On a platform or
+sandbox where the hardware id can't be read, it falls back to a generated,
+persisted random UUID (same shape as `device_uuid`'s fallback).
+
+### `last_hook_invocation_at`
+
+The collector touches `${ATTRIBUT_CONFIG_DIR:-~/.attribut}/state.json` on
+every real hook fire (cheap, best-effort, never blocks the hook). The
+heartbeat reads it back so the server can distinguish "connector installed but
+the agent hasn't run in days" from "connector installed and actively firing."
+
 ## Install (manual / scripted)
 
 ```sh
@@ -178,7 +255,9 @@ previous settings file is backed up to `settings.json.bak.<timestamp>` (mode
 `uninstall` strips only ATTRIBUT's entries (matching our collector path, and the
 legacy `attribut-collector.cjs` from old installs), prunes empty event arrays,
 removes the stored token, and deletes any legacy collector files a previous
-install copied into `~/.claude/hooks/`.
+install copied into `~/.claude/hooks/`. The default (no `--provider`) form is a
+full disconnect — it also removes the hourly heartbeat timer, since that timer
+is device-level rather than tied to one agent's hooks.
 
 ## Transport
 
@@ -209,6 +288,9 @@ tail-read. `SessionEnd` / `Stop` always reconcile the full session.
 | `CURSOR_HOOKS_PATH` | override the Cursor `hooks.json` install target | `~/.cursor/hooks.json` |
 | `CURSOR_STATE_DB` | override the Cursor `state.vscdb` the parser reads (numbers-only) | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
 | `CLAUDE_CODE_REMOTE_SESSION_ID` | set by Claude Code in cloud VMs; stamps `claude.remoteSessionId` + `_isCloud` | — |
+| `ATTRIBUT_LAUNCHD_DIR` | override the launchd LaunchAgents dir the heartbeat timer installs into (macOS) | `~/Library/LaunchAgents` |
+| `ATTRIBUT_SYSTEMD_USER_DIR` | override the systemd `--user` unit dir the heartbeat timer installs into (Linux) | `~/.config/systemd/user` |
+| `ATTRIBUT_SKIP_TIMER_ACTIVATION` | `1` writes the heartbeat timer's unit/task file(s) but skips the real launchctl/systemctl/schtasks call (tests only) | — |
 
 ## Hook modes
 

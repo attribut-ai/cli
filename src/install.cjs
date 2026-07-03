@@ -504,7 +504,15 @@ function runUninstall(argv) {
     return 1;
   }
 
-  if (result.removed === 0 && legacyRemoved === 0 && !tokenRemoved) {
+  // This is the whole-file (no --provider) uninstall — the only path that
+  // drops every agent's token, i.e. a full disconnect. The heartbeat timer is
+  // device-level, not per-agent, so it only comes out here (a per-provider
+  // uninstall leaves other agents, and this timer, connected). Required
+  // lazily — see timer.cjs, which itself requires this module for
+  // collectorPath().
+  const timerRemoved = require('./timer.cjs').removeTimer();
+
+  if (result.removed === 0 && legacyRemoved === 0 && !tokenRemoved && !timerRemoved) {
     out('No ATTRIBUT hooks found — nothing to do.');
     return 0;
   }
@@ -514,6 +522,7 @@ function runUninstall(argv) {
   }
   if (legacyRemoved > 0) out(`Deleted ${legacyRemoved} legacy collector file(s) from ${legacyHooksDir()}`);
   if (tokenRemoved) out('Removed stored ingest token.');
+  if (timerRemoved) out('Removed the heartbeat timer.');
   out('ATTRIBUT capture hook removed.');
   return 0;
 }
