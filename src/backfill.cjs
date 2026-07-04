@@ -154,7 +154,7 @@ function asyncPool(concurrency, items, worker) {
   return new Promise((resolve) => {
     const results = new Array(items.length);
     if (items.length === 0) return resolve(results);
-    const n = Math.max(1, concurrency);
+    const n = Math.max(1, Number.isFinite(concurrency) ? concurrency : 1);
     let nextIndex = 0;
     let completed = 0;
 
@@ -256,9 +256,11 @@ async function uploadAll(perAgent, { concurrency = 8, dryRun = false, onProgress
         }
         sent++;
       } catch (e) {
+        // Self-accounting: count + log the failure here. asyncPool's result array
+        // is intentionally unused by uploadAll, so we do NOT re-throw — a single
+        // session's failure must never abort the batch.
         failed++;
         err(`  (backfill: ${agent} session failed: ${e.message})`);
-        throw e;
       } finally {
         done++;
         if (onProgress) onProgress({ agent, done, total });
@@ -450,6 +452,14 @@ async function runBackfill(argv) {
   }
   if (agents.length === 0) {
     err('No connected agents to backfill (nothing has a stored token). Run `attribut connect` first, or pass --agents.');
+    return 2;
+  }
+
+  // `--since` consumed with no following value → r.since is undefined. Treat that
+  // as a usage error (fail loud), consistent with `--agents`, rather than silently
+  // falling back to the 90d default and backfilling the wrong window.
+  if (!opts.all && opts.since === undefined) {
+    err('--since given with no value (expected "<N>d", an ISO date, or use --all).');
     return 2;
   }
 
