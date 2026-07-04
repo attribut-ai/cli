@@ -324,18 +324,25 @@ async function runConnect(argv) {
   const deviceCode = crypto.randomBytes(32).toString('base64url');
   const hostname = os.hostname();
 
-  // 1) Start the device flow.
+  // 1) Start the device flow. This is a network round-trip to the app, so show a
+  // spinner — otherwise the wait between the tool picker and the approval link
+  // reads as a freeze.
+  const startSpin = await ui.spinner();
+  startSpin.start('Requesting an approval link…');
   let start;
   try {
     start = await postJson(`${appBase}/api/device/start`, { deviceCode, hostname, agents });
   } catch (e) {
+    startSpin.error('Could not reach ATTRIBUT');
     err(`Could not reach ${appBase}: ${e.message}`);
     return 1;
   }
   if (start.status < 200 || start.status >= 300 || !start.json || !start.json.userCode) {
+    startSpin.error('Could not start approval');
     err(`Device start failed (HTTP ${start.status}): ${(start.json && start.json.error) || start.text || 'unknown error'}`);
     return 1;
   }
+  startSpin.stop('Approval link ready');
   const { verificationUrl, expireAt } = start.json;
 
   // 2) Tell the user where to approve (and try to open it for them). The

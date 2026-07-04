@@ -62,7 +62,7 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
   const { getDatabaseClass } = require('../../../src/parser/antigravity_tokens.cjs');
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) {
-    throw new Error('No SQLite driver available (neither node:sqlite nor better-sqlite3 found)');
+    throw new Error('No SQLite driver available (node:sqlite not found — requires Node >=22.5)');
   }
   fs.mkdirSync(dir, { recursive: true });
   const dbPath = path.join(dir, `${conversationId}.db`);
