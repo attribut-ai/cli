@@ -52,7 +52,7 @@ const {
   expandHome,
 } = require('./claude_code.cjs');
 
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
 const CAP_LABEL = 128; // model / effort / version / agent_type / role / status
 
 function cap(s, n) {
@@ -325,7 +325,7 @@ function parseCodexRollout(rolloutPath, extra = {}) {
   // Strip the internal fold-only fields before the records enter the payload.
   const cleanSubagents = subagents.map(({ _commitSHA, _struct, ...rest }) => rest);
 
-  const model = models.size === 1 ? [...models][0] : models.size ? [...models][0] : null;
+  const model = models.size ? [...models][0] : null;
 
   const payload = {
     sessionId: extra.sessionId || sessionId,

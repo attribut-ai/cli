@@ -49,7 +49,7 @@ const path = require('path');
 const { expandHome } = require('./claude_code.cjs');
 const { getDatabaseClass } = require('./antigravity_tokens.cjs');
 
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
 const CAP_LABEL = 128; // model / version / reason
 const CAP_EMAIL = 320; // RFC-ish upper bound; the schema caps at 320
 const MAX_SUBAGENTS = 64; // sanity bound on subComposerIds fan-out

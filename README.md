@@ -33,7 +33,7 @@ and POSTs it to the ingest endpoint. That is all it does.
 
 The complete payload — nothing outside this list leaves the machine. The
 [schema](src/contract/envelope.schema.json) is the canonical definition; every
-free-form string is length-capped before it is sent.
+free-form string is length-capped before it is sent (except `repo` — see below).
 
 | field | meaning |
 |---|---|
@@ -43,7 +43,7 @@ free-form string is length-capped before it is sent.
 | `model` | primary model id |
 | `tokens_in` / `tokens_out` | summed input / output tokens |
 | `started_at` / `ended_at` / `duration_ms` | session timing |
-| `repo` | the working-directory path (the hook's `cwd`); capped at 256 chars |
+| `repo` | the working-directory path (the hook's `cwd`); uncapped (see below) |
 | `branch` | git branch |
 | `commitSHA` | deduped list of commit SHAs from `git commit` stdout |
 | `num_turns` / `num_tool_calls` | assistant turn + tool-call counts |

@@ -7,7 +7,8 @@
 //   1. runs the SAME allowlist parser the hook uses (parser never reads
 //      prompt/response/code text — see parser/claude_code.cjs),
 //   2. validates the resulting payload against the FROZEN contract schema
-//      (envelope.v1: additionalProperties:false + maxLength on every string), and
+//      (envelope.v1: additionalProperties:false + maxLength on every string
+//      except `repo`, which is intentionally uncapped — see parser notes), and
 //   3. adversarially scans — it pulls the ACTUAL sensitive content out of your
 //      transcript (prompt + response text, tool inputs, tool results / file
 //      bodies) and confirms none of it appears verbatim in the payload.
@@ -76,11 +77,6 @@ function allTranscripts() {
   }
   found.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return found.map((x) => x.abs);
-}
-
-// The single most-recently-modified session transcript, or null.
-function newestTranscript() {
-  return allTranscripts()[0] || null;
 }
 
 // Pull the free-text / content-bearing strings out of a transcript row. This is
@@ -312,7 +308,6 @@ module.exports = {
   runAudit,
   auditOne,
   allTranscripts,
-  newestTranscript,
   analyze,
   scanForLeaks,
   sensitiveStringsFromRow,
