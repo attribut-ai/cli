@@ -8,7 +8,9 @@ and POSTs it to the ingest endpoint. That is all it does.
 
 ## What it does (and what it never does)
 
-- Reads **only** the local Claude Code transcript `.jsonl`.
+- Reads **only** each tool's own local session record — Claude Code's
+  transcript `.jsonl`, Codex's rollout `.jsonl`, and Cursor's / Antigravity's
+  local state DB. Nothing is fetched from the network to build a payload.
 - Extracts **only** the fields named in the frozen contract (the vendored
   [`src/contract/envelope.schema.json`](src/contract/envelope.schema.json)):
   session id, **device id**, model, token counts, cache tokens, commit SHAs
@@ -19,11 +21,12 @@ and POSTs it to the ingest endpoint. That is all it does.
   contents, tool input args, or PR/commit message bodies. There is no denylist —
   if a field is not in the contract, it never leaves the machine. A golden test
   enforces this.
-- **One authorized content exception — `title`.** Claude's short
+- **One authorized content exception — `title`.** The tool's short
   model-generated chat title (or a user's custom title) is the single
   content-derived field, added by explicit product decision (see the contract's
-  "Content-derived exception"). It is read only from the `ai-title` /
-  `custom-title` transcript rows — never from `last-prompt` or any message body.
+  "Content-derived exception"). It is read only from the tool's title field
+  (e.g. Claude Code's `ai-title` / `custom-title` rows) — never from
+  `last-prompt` or any message body.
   The privacy golden test excludes `title` from its leak sentinels while still
   asserting no *other* content leaks.
 - **No interpretation client-side.** Pricing, attribution, identity, and any
@@ -37,7 +40,7 @@ free-form string is length-capped before it is sent.
 
 | field | meaning |
 |---|---|
-| `sessionId` | Claude Code session id |
+| `sessionId` | the tool's session id |
 | `device_uuid` | stable per-machine id (see below) — **not** identity |
 | `title` | the one content-derived field (see below); capped at 200 chars |
 | `model` | primary model id |
@@ -345,7 +348,7 @@ envelope.
 
 ### Failure policy
 
-A telemetry collector must **never** block the user's Claude Code session. On any
+A telemetry collector must **never** block the user's coding session. On any
 error (bad stdin, unreadable transcript, network/validation failure) the
 collector logs to **stderr** and exits **0**. It never silently swallows — it
 always logs — but it never breaks the session.
@@ -395,8 +398,8 @@ The collector logs every action to **stderr** prefixed with `[attribut]`, and
   `no ingest token …`. The latter means the `0600` token file is missing —
   re-run `attribut install --key=<token>`.
 - **Verify offline**, without posting, using `--parse` / `--dry-run` (above).
-- After installing, **restart any running Claude Code sessions** to pick up the
-  hook.
+- After installing, **restart any running sessions** (Claude Code, Codex,
+  Cursor, Antigravity) to pick up the hook.
 
 ## License
 
