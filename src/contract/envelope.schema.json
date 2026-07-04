@@ -9,7 +9,7 @@
     "provider": { "enum": ["anthropic", "openai", "google", "cursor"] },
     "tool": { "enum": ["claude_code", "codex", "antigravity", "cursor"] },
     "schema_version": { "type": "integer", "enum": [1] },
-    "_trigger": { "enum": ["sessionend", "stop", "posttooluse"] },
+    "_trigger": { "enum": ["sessionend", "stop", "posttooluse", "backfill"] },
     "_source": { "enum": ["cli", "cowork"] },
     "_isCloud": { "type": "boolean" },
     "_cli_version": { "type": "string", "maxLength": 64 },

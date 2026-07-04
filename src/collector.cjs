@@ -666,6 +666,9 @@ Commands:
                against the frozen contract and scan it for content leaks.
                  attribut audit                 sweep ALL local sessions (summary)
                  attribut audit <transcript>    full payload for one session
+  backfill     Send your EXISTING local sessions (pre-connect history) to ATTRIBUT.
+                 attribut backfill [--agents=a,b] [--since=90d|<ISO>] [--all]
+                                   [--yes] [--dry-run]
   help         Show this help
 
 As a Claude Code hook the collector is invoked with a trigger
@@ -688,6 +691,7 @@ async function main() {
   if (sub === 'connect') return require('./connect.cjs').runConnect(argv.slice(1));
   if (sub === 'heartbeat') return require('./heartbeat.cjs').runHeartbeat(argv.slice(1));
   if (sub === 'audit') return require('./audit.cjs').runAudit(argv.slice(1));
+  if (sub === 'backfill') return require('./backfill.cjs').runBackfill(argv.slice(1));
   if (sub === 'help' || sub === '--help' || sub === '-h') {
     printHelp();
     return 0;
