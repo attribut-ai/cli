@@ -1,6 +1,6 @@
 {
   "name": "attribut",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "ATTRIBUT thin allowlist telemetry collector for Claude Code — extracts only safe, signal-bearing fields (never prompt/response/code/diff text) and POSTs them to ingest.",
   "bin": {
     "attribut": "src/collector.cjs"
@@ -18,6 +18,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@clack/prompts": "^1.7.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1"
   },

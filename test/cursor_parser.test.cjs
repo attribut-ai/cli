@@ -187,3 +187,38 @@ test('resolveComposerId prefers conversation_id, falls back to transcript basena
   );
   assert.strictEqual(cursor.resolveComposerId({}), null);
 });
+
+// --- indexed prefix range (the LIKE→range-scan perf fix) --------------------
+
+test('prefixRange returns a half-open [prefix, prefix+U+FFFF) that brackets exactly the prefix', () => {
+  const [lo, hi] = cursor.prefixRange('bubbleId:CID:');
+  assert.strictEqual(lo, 'bubbleId:CID:');
+  assert.strictEqual(hi, 'bubbleId:CID:￿');
+  // Any key starting with the prefix sorts within [lo, hi).
+  const inside = 'bubbleId:CID:b7';
+  assert.ok(inside >= lo && inside < hi);
+  // A sibling composer whose id EXTENDS this one ("CIDx") sorts OUTSIDE the range
+  // — its ':' separator (0x3A) is below 'x' (0x78), so its keys are excluded.
+  const sibling = 'bubbleId:CIDx:b0';
+  assert.ok(!(sibling >= lo && sibling < hi));
+});
+
+test('range-scan reads ONLY the target composer\'s bubbles — a prefix-sibling never bleeds in', () => {
+  const fx = buildCursorFixture(baseSpec()); // CID: output = 1079 + 5810
+  // Inject a DECOY composer "CIDx" (shares CID as a prefix) carrying huge tokens.
+  // A naive prefix match that over-reaches would fold these into CID's totals.
+  const DB = require('../src/parser/antigravity_tokens.cjs').getDatabaseClass();
+  const db = new DB(fx.dbPath);
+  db.prepare('INSERT OR REPLACE INTO cursorDiskKV VALUES (?, ?)').run(
+    `bubbleId:${CID}x:b0`,
+    JSON.stringify({ type: 2, tokenCount: { inputTokens: 999999, outputTokens: 999999 } })
+  );
+  db.close();
+  withDb(fx, () => {
+    const p = cursor.parseCursorSession({ composerId: CID, transcriptPath: fx.transcriptPath });
+    // Decoy's 999999 must NOT appear — only CID's own bubbles are summed.
+    assert.strictEqual(p.cursor.output_tokens, 1079 + 5810);
+    assert.strictEqual(p.cursor.input_tokens_cumulative, 12766 + 21223);
+    assert.strictEqual(p.cursor.priced_turns, 2);
+  });
+});

@@ -55,6 +55,15 @@ const CAP_LABEL = 128; // model / version / reason
 const CAP_EMAIL = 320; // RFC-ish upper bound; the schema caps at 320
 const MAX_SUBAGENTS = 64; // sanity bound on subComposerIds fan-out
 
+// Half-open [lo, hi) key range for a prefix match against the UNIQUE `key` index,
+// so `WHERE key >= lo AND key < hi` is an indexed SEARCH rather than the full
+// SCAN a `LIKE 'prefix%'` forces (default collation defeats the index). '￿'
+// sorts above every character in our keys (uuids / hex / ':' separators), so the
+// range captures exactly the rows whose key starts with `prefix`.
+function prefixRange(prefix) {
+  return [prefix, prefix + '￿'];
+}
+
 function intOrNull(v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
   return Math.max(0, Math.trunc(v));
@@ -196,9 +205,14 @@ function readBubbleTokens(db, composerId, orderedBubbleIds) {
   if (!db || !composerId) return empty;
   let byId;
   try {
+    // Indexed prefix match — NOT `LIKE 'prefix%'`. LIKE can't use the key index
+    // (default case-insensitive collation), so it full-SCANs all ~200k rows for
+    // EVERY session (~1s each). A half-open range on the UNIQUE `key` column is an
+    // indexed SEARCH (~1ms). See prefixRange().
+    const [lo, hi] = prefixRange(`bubbleId:${composerId}:`);
     const rows = db
-      .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ?')
-      .all(`bubbleId:${composerId}:%`);
+      .prepare('SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?')
+      .all(lo, hi);
     byId = new Map();
     for (const r of rows) {
       if (!r || typeof r.value !== 'string' || typeof r.key !== 'string') continue;
@@ -447,7 +461,10 @@ function listComposerIds(db) {
   if (!db) return [];
   let rows;
   try {
-    rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'").all();
+    // Indexed prefix match (see prefixRange / readBubbleTokens) instead of
+    // `LIKE 'composerData:%'`, which would full-scan all ~200k rows.
+    const [lo, hi] = prefixRange('composerData:');
+    rows = db.prepare('SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(lo, hi);
   } catch {
     return [];
   }
@@ -480,6 +497,7 @@ function listComposerIds(db) {
 module.exports = {
   stateDbPath,
   openStateDb,
+  prefixRange,
   readComposerRow,
   pickComposerFields,
   readBubbleTokens,

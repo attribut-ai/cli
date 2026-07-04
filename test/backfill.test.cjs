@@ -397,3 +397,96 @@ test('enumerate("cursor") excludes sub-composers referenced in a parent\'s subCo
     else process.env.CURSOR_STATE_DB = prev;
   }
 });
+
+// =============================================================================
+// failureSummary — friendly, categorized, no raw paths (UX)
+// =============================================================================
+
+const { uploadAll, failureSummary, defaultConcurrency } = backfill;
+
+test('failureSummary: null when there are no failures', () => {
+  assert.equal(failureSummary([]), null);
+  assert.equal(failureSummary(undefined), null);
+});
+
+test('failureSummary: all-ENOENT reads as "no longer on disk", pluralized, no raw path', () => {
+  const one = failureSummary([
+    { agent: 'agy', message: "ENOENT: no such file or directory, open '/Users/x/.gemini/brain/z/transcript_full.jsonl'" },
+  ]);
+  assert.match(one, /1 session was skipped/);
+  assert.match(one, /no longer on disk/);
+  assert.doesNotMatch(one, /ENOENT|\/Users\/|transcript_full/); // never leak the raw error/path
+  const two = failureSummary([
+    { agent: 'agy', message: 'ENOENT: no such file or directory' },
+    { agent: 'agy', message: 'ENOENT: no such file or directory' },
+  ]);
+  assert.match(two, /2 sessions were skipped/);
+});
+
+test('failureSummary: a non-ENOENT cause reads as "could not be read locally"', () => {
+  const s = failureSummary([{ agent: 'codex', message: 'unexpected token in JSON' }]);
+  assert.match(s, /could not be read locally/);
+  assert.doesNotMatch(s, /unexpected token/);
+});
+
+// =============================================================================
+// uploadAll — phased (preprocess → transmit); failures collected, not thrown
+// =============================================================================
+
+test('uploadAll: a build failure is collected (not thrown), counted, and still ticks progress', async () => {
+  // A claude_code descriptor pointing at a nonexistent transcript: the PREPROCESS
+  // phase build throws, so it never reaches transmit — no network needed.
+  const perAgent = [{ agent: 'claude_code', descriptors: [{ path: '/nonexistent/nope.jsonl', whenMs: 0 }] }];
+  const ticks = [];
+  const { summary, failures } = await uploadAll(perAgent, {
+    onProgress: (p) => ticks.push(p),
+  });
+  assert.equal(summary.length, 1);
+  assert.equal(summary[0].sent, 0);
+  assert.equal(summary[0].failed, 1);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].agent, 'claude_code');
+  assert.equal(ticks.length, 1); // progress advances once even for a skipped session
+  assert.deepEqual(ticks[0], { agent: 'claude_code', done: 1, total: 1 });
+});
+
+test('uploadAll --dry-run: collects built envelopes, POSTs nothing, ticks once per session', async () => {
+  const prevSessDir = process.env.CODEX_SESSIONS_DIR;
+  process.env.CODEX_SESSIONS_DIR = CODEX_FIX_DIR;
+  try {
+    const result = scan(['codex'], { sinceMs: null });
+    assert.ok(result.total >= 1);
+    let ticks = 0;
+    const { summary, envelopes, failures } = await uploadAll(result.perAgent, {
+      dryRun: true,
+      onProgress: () => (ticks += 1),
+    });
+    assert.equal(failures.length, 0);
+    assert.equal(envelopes.length, result.total); // one built envelope per session
+    assert.equal(summary[0].sent, result.total);
+    assert.equal(ticks, result.total);
+    assert.ok(envelopes[0].envelope && envelopes[0].agent === 'codex');
+  } finally {
+    if (prevSessDir === undefined) delete process.env.CODEX_SESSIONS_DIR;
+    else process.env.CODEX_SESSIONS_DIR = prevSessDir;
+  }
+});
+
+test('defaultConcurrency: 16 by default, env-overridable, capped at 64, ignores junk', () => {
+  const prev = process.env.ATTRIBUT_BACKFILL_CONCURRENCY;
+  try {
+    delete process.env.ATTRIBUT_BACKFILL_CONCURRENCY;
+    assert.equal(defaultConcurrency(), 16);
+    process.env.ATTRIBUT_BACKFILL_CONCURRENCY = '8';
+    assert.equal(defaultConcurrency(), 8);
+    process.env.ATTRIBUT_BACKFILL_CONCURRENCY = '999';
+    assert.equal(defaultConcurrency(), 64);
+    process.env.ATTRIBUT_BACKFILL_CONCURRENCY = 'nonsense';
+    assert.equal(defaultConcurrency(), 16);
+    process.env.ATTRIBUT_BACKFILL_CONCURRENCY = '0';
+    assert.equal(defaultConcurrency(), 16);
+  } finally {
+    if (prev === undefined) delete process.env.ATTRIBUT_BACKFILL_CONCURRENCY;
+    else process.env.ATTRIBUT_BACKFILL_CONCURRENCY = prev;
+  }
+});
