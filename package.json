@@ -1,7 +1,24 @@
 {
   "name": "attribut",
   "version": "1.0.1",
-  "description": "ATTRIBUT thin allowlist telemetry collector for Claude Code — extracts only safe, signal-bearing fields (never prompt/response/code/diff text) and POSTs them to ingest.",
+  "description": "ATTRIBUT thin allowlist telemetry collector for AI coding agents (Claude Code, OpenAI Codex, Cursor, Google Antigravity) — extracts only safe, signal-bearing fields (never prompt/response/code/diff text) and POSTs them to ingest.",
+  "keywords": [
+    "telemetry",
+    "claude-code",
+    "codex",
+    "cursor",
+    "antigravity",
+    "ai-coding",
+    "attribution"
+  ],
+  "homepage": "https://attribut.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attribut-ai/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/attribut-ai/cli/issues"
+  },
   "bin": {
     "attribut": "src/collector.cjs"
   },
@@ -12,7 +29,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test --test-concurrency=1 \"test/**/*.test.cjs\""
+    "test": "for f in test/*.test.cjs; do node \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=22.5"
