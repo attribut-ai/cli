@@ -44,6 +44,7 @@ const agyTokens = require('./antigravity_tokens.cjs');
 // String caps, mirroring the schema's maxLength bounds (defense-in-depth).
 const CAP_TITLE = 200;
 const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / version / reason / agent_type / status
 
 function cap(s, n) {
@@ -262,7 +263,7 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...shaSet],
     num_turns: numTurns,

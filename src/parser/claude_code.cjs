@@ -25,13 +25,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Hard caps on the free-form string fields before they enter the payload
-// (except `repo`, which is intentionally uncapped for folder->org attribution).
+// Hard caps on every free-form string field before it enters the payload.
 // Defense-in-depth: even the one content-derived field (`title`) and any value
-// echoed verbatim from the transcript can never carry an unbounded blob. Caps
-// match the schema's maxLength so a truncated value always validates.
+// echoed verbatim from the transcript can never carry an unbounded blob. `repo`
+// carries the full cwd path (folder->org attribution), so it gets a generous
+// CAP_REPO rather than the tight CAP_PATH — but it is still bounded. Caps match
+// the schema's maxLength so a truncated value always validates.
 const CAP_TITLE = 200;
 const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / service_tier / stop_reason / version / agent_type / status
 
 // Truncate a string to n chars; pass through null/undefined unchanged.
@@ -681,7 +683,7 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: extra.repo || repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(extra.repo || repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA,
     num_turns: numTurns,

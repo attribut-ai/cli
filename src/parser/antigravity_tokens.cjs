@@ -383,9 +383,19 @@ function collectStringsAtPath(buf, prefix, target, out) {
   }
 }
 
+// A generated title is a single-line summary. Reject any candidate that is
+// multi-line or carries control characters — those shapes signal we have drifted
+// off TITLE_PATH onto prompt/response or code body text (e.g. an upstream agy
+// protobuf-field renumber), which must NEVER leave the machine. Defense-in-depth
+// on top of TITLE_PATH being the empirically verified title location.
+function looksLikeTitle(s) {
+  return typeof s === 'string' && s.length > 0 && !/[\x00-\x1f\x7f]/.test(s);
+}
+
 // Read the generated session title for a conversation, or null. Scans the steps'
 // step_payload for the string at TITLE_PATH and returns the latest non-empty one
-// (the title is refined as the session grows). READ-ONLY, fail-safe.
+// that passes the title shape-guard (the title is refined as the session grows).
+// READ-ONLY, fail-safe.
 function readTitle(conversationId) {
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return null;
@@ -403,8 +413,11 @@ function readTitle(conversationId) {
       if (!blob || !(blob instanceof Uint8Array)) continue;
       const out = [];
       collectStringsAtPath(Buffer.from(blob), '', TITLE_PATH, out);
-      // Latest non-empty wins.
-      for (const s of out) if (s && s.trim()) title = s;
+      // Latest non-empty, title-shaped candidate wins.
+      for (const s of out) {
+        const t = s && s.trim();
+        if (t && looksLikeTitle(t)) title = t;
+      }
     }
     return title ? title.slice(0, 200) : null;
   } catch {
@@ -586,6 +599,7 @@ module.exports = {
   looksLikeMessage,
   collectVarints,
   collectStringsAtPath,
+  looksLikeTitle,
   readUsageRaw,
   readModel,
   readTitle,

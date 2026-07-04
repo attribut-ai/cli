@@ -72,6 +72,13 @@ function buildHeartbeatPayload({
 
 // POST `body` to `urlStr` with a hard timeout. Resolves on 2xx, rejects
 // otherwise — runHeartbeat is the one that decides to swallow the rejection.
+// Warn (don't block) when a token-bearing POST resolves to a host outside the
+// expected attribut.ai family — the endpoint is env-overridable, so this is
+// defense-in-depth against silently redirecting the token to another origin.
+function isExpectedHost(hostname) {
+  return hostname === 'attribut.ai' || hostname.endsWith('.attribut.ai');
+}
+
 function postJson(urlStr, body, { bearer, timeoutMs = 5000 } = {}) {
   return new Promise((resolve, reject) => {
     let url;
@@ -87,6 +94,12 @@ function postJson(urlStr, body, { bearer, timeoutMs = 5000 } = {}) {
           `refusing to POST to non-https endpoint ${url.href} ` +
             '(set ATTRIBUT_ALLOW_INSECURE=1 only for local testing).'
         )
+      );
+    }
+    if (bearer && !allowInsecure && !isExpectedHost(url.hostname)) {
+      process.stderr.write(
+        `[attribut] warning: sending token to non-default host ${url.hostname} ` +
+          `(expected the attribut.ai host family).\n`
       );
     }
     const payload = Buffer.from(JSON.stringify(body), 'utf8');

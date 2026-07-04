@@ -57,6 +57,15 @@ function endpoint() {
   return `${base}/v1/hook`;
 }
 
+// The ingest origin is env-overridable (ATTRIBUT_COLLECTOR_URL / INGEST_BASE), so
+// a controlled environment could redirect the Bearer token + telemetry elsewhere.
+// We still send (the override is a legitimate feature), but warn loudly to stderr
+// when the host is not the expected attribut.ai family — defense-in-depth against
+// silent exfiltration. Suppressed under the localhost test hatch.
+function isExpectedIngestHost(hostname) {
+  return hostname === 'attribut.ai' || hostname.endsWith('.attribut.ai');
+}
+
 // The bearer token for `agent`, read from its 0600 file (written by `attribut
 // install` / `attribut connect`). `attribut connect` stores a DISTINCT token per
 // agent; we resolve the right one from the hook's provider. A legacy single
@@ -127,6 +136,12 @@ function postEnvelope(envelope, agent) {
           `refusing to POST to non-https endpoint ${url.href} ` +
             '(set ATTRIBUT_ALLOW_INSECURE=1 only for local testing).'
         )
+      );
+    }
+    if (!allowInsecure && !isExpectedIngestHost(url.hostname)) {
+      process.stderr.write(
+        `[attribut] warning: POSTing token + telemetry to non-default ingest host ` +
+          `${url.hostname} (expected the attribut.ai host family).\n`
       );
     }
     const tok = token(agent);

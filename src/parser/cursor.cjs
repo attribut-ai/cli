@@ -50,6 +50,7 @@ const { expandHome } = require('./claude_code.cjs');
 const { getDatabaseClass } = require('./antigravity_tokens.cjs');
 
 const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / version / reason
 const CAP_EMAIL = 320; // RFC-ish upper bound; the schema caps at 320
 const MAX_SUBAGENTS = 64; // sanity bound on subComposerIds fan-out
@@ -392,7 +393,7 @@ function parseCursorSession(extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: extra.repo || null,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(extra.repo || null, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(extra.branch || null, CAP_PATH),
     commitSHA: [],
     num_turns: numTurns,
