@@ -191,3 +191,17 @@ test('readAgentType matches a known candidate name in the child', { skip: !nodeS
     assert.strictEqual(tokens.readAgentType('c', ['nope']), null);
   });
 });
+
+// Title shape-guard: the title is the ONE agy field emitting arbitrary UTF-8 read
+// from a fixed protobuf path. If an upstream field renumber ever pointed that path
+// at prompt/response/code body text, the guard must reject it (multi-line / control
+// chars) so body text never leaves the machine.
+test('looksLikeTitle accepts single-line summaries, rejects body-text shapes', () => {
+  assert.strictEqual(tokens.looksLikeTitle('Refactor the auth module'), true);
+  assert.strictEqual(tokens.looksLikeTitle('Fix bug (edge case)'), true);
+  assert.strictEqual(tokens.looksLikeTitle(''), false);
+  assert.strictEqual(tokens.looksLikeTitle('line one\nline two'), false); // multi-line prompt/response
+  assert.strictEqual(tokens.looksLikeTitle('const x = 1;\nfoo();'), false); // code body
+  assert.strictEqual(tokens.looksLikeTitle('has\ttab'), false); // control char
+  assert.strictEqual(tokens.looksLikeTitle(null), false);
+});

@@ -7,11 +7,16 @@
 //   1. runs the SAME allowlist parser the hook uses (parser never reads
 //      prompt/response/code text — see parser/claude_code.cjs),
 //   2. validates the resulting payload against the FROZEN contract schema
-//      (envelope.v1: additionalProperties:false + maxLength on every string
-//      except `repo`, which is intentionally uncapped — see parser notes), and
+//      (envelope.v1: additionalProperties:false + a maxLength on every string —
+//      `repo` gets a generous 2000-char cap, the rest are tighter), and
 //   3. adversarially scans — it pulls the ACTUAL sensitive content out of your
 //      transcript (prompt + response text, tool inputs, tool results / file
 //      bodies) and confirms none of it appears verbatim in the payload.
+//
+// SCOPE: the runnable adversarial scan covers the Claude Code parser/transcripts
+// (~/.claude/projects). The schema-level guarantee (additionalProperties:false +
+// per-tool allowlist) applies to ALL tools — codex/cursor/antigravity — but this
+// command does not yet re-derive their source content to scan it.
 //
 // Read-only. Exit 0 = PASS, 1 = a leak was found (contract bug), 2 = usage error.
 

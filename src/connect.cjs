@@ -162,6 +162,13 @@ function ingestBaseFrom(opts, sampleEndpoint) {
 // POST JSON to `urlStr`; resolve { status, json } for ANY HTTP status (the caller
 // decides), reject only on transport error/timeout or a non-https base without
 // the insecure escape hatch. `bearer` adds an Authorization header.
+// Warn (don't block) when a token-bearing POST resolves to a host outside the
+// expected attribut.ai family — the endpoint is env/flag-overridable, so this is
+// defense-in-depth against silently redirecting the token to another origin.
+function isExpectedHost(hostname) {
+  return hostname === 'attribut.ai' || hostname.endsWith('.attribut.ai');
+}
+
 function postJson(urlStr, body, { bearer, timeoutMs = 15000 } = {}) {
   return new Promise((resolve, reject) => {
     let url;
@@ -177,6 +184,12 @@ function postJson(urlStr, body, { bearer, timeoutMs = 15000 } = {}) {
           `refusing to POST to non-https endpoint ${url.href} ` +
             '(set ATTRIBUT_ALLOW_INSECURE=1 only for local testing).'
         )
+      );
+    }
+    if (bearer && !allowInsecure && !isExpectedHost(url.hostname)) {
+      process.stderr.write(
+        `[attribut] warning: sending token to non-default host ${url.hostname} ` +
+          `(expected the attribut.ai host family).\n`
       );
     }
     const payload = Buffer.from(JSON.stringify(body), 'utf8');

@@ -53,6 +53,7 @@ const {
 } = require('./claude_code.cjs');
 
 const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / effort / version / agent_type / role / status
 
 function cap(s, n) {
@@ -337,7 +338,7 @@ function parseCodexRollout(rolloutPath, extra = {}) {
     started_at: tMin !== null ? new Date(tMin).toISOString() : null,
     ended_at: tMax !== null ? new Date(tMax).toISOString() : null,
     duration_ms: tMin !== null && tMax !== null ? tMax - tMin : null,
-    repo: extra.repo || repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(extra.repo || repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...mergedShas],
     num_turns: numTurns,
