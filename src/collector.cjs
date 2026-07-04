@@ -270,8 +270,10 @@ function posttooluseCanSkip(hook) {
     const len = size - offset;
     const buf = Buffer.allocUnsafe(len);
     fd = fs.openSync(abs, 'r');
-    fs.readSync(fd, buf, 0, len, offset);
-    const tail = buf.toString('utf8');
+    // Use only the bytes actually read: if the file was truncated/rotated between
+    // statSync and readSync, `n < len` and the buffer tail is uninitialized memory.
+    const n = fs.readSync(fd, buf, 0, len, offset);
+    const tail = buf.subarray(0, n).toString('utf8');
     writeCursor(hook.session_id, size);
     // Same trigger the parser uses: a `[branch sha]` commit line in the new bytes.
     parser.SHA_RE.lastIndex = 0;
@@ -913,14 +915,28 @@ async function main() {
   return 0;
 }
 
-// Top-level: any uncaught error is logged and exits 0 — telemetry must never
-// break the user's session.
+// Management subcommands are documented FAIL-LOUD (see install.cjs / connect.cjs):
+// an unexpected throw there must surface as a NON-ZERO exit, not be silently
+// reported as success. The hook hot path is the opposite — a telemetry failure
+// must NEVER block the user's session — so its uncaught errors stay exit-0.
+const MANAGEMENT_COMMANDS = new Set([
+  'install',
+  'uninstall',
+  'connect',
+  'heartbeat',
+  'audit',
+  'backfill',
+]);
+
+// Top-level: a normally-returned code is honored. An UNCAUGHT error is logged;
+// then we exit non-zero for the fail-loud management subcommands and exit 0 for
+// the hook hot path (telemetry must never break the user's session).
 if (require.main === module) {
   main()
     .then((code) => process.exit(typeof code === 'number' ? code : 0))
     .catch((err) => {
       log(`unexpected error: ${err && err.message ? err.message : err}`);
-      process.exit(0);
+      process.exit(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
     });
 }
 

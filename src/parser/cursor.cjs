@@ -81,20 +81,20 @@ function modelOrNull(v) {
   return MODEL_ID_RE.test(s) ? s : null;
 }
 
-/** Default Cursor state DB path. Override via CURSOR_STATE_DB (used in tests). */
+/** Default Cursor state DB path (platform-branched, mirroring machine_id.cjs).
+ * Override via CURSOR_STATE_DB (used in tests). */
 function stateDbPath() {
-  return (
-    process.env.CURSOR_STATE_DB ||
-    path.join(
-      os.homedir(),
-      'Library',
-      'Application Support',
-      'Cursor',
-      'User',
-      'globalStorage',
-      'state.vscdb'
-    )
-  );
+  if (process.env.CURSOR_STATE_DB) return process.env.CURSOR_STATE_DB;
+  const tail = ['Cursor', 'User', 'globalStorage', 'state.vscdb'];
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, ...tail);
+  }
+  if (process.platform === 'linux') {
+    return path.join(os.homedir(), '.config', ...tail);
+  }
+  // darwin (and any other) → the macOS location.
+  return path.join(os.homedir(), 'Library', 'Application Support', ...tail);
 }
 
 /** Open the state DB read-only. Returns null on any failure (SQLite unavailable,

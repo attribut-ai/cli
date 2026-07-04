@@ -337,8 +337,12 @@ async function runConnect(argv) {
   out('');
   out('Waiting for approval…');
 
-  // 3) Poll until approved / expired / deadline.
-  const interval = parseInt(process.env.ATTRIBUT_POLL_INTERVAL_MS || '3000', 10);
+  // 3) Poll until approved / expired / deadline. Guard the env override: a
+  // non-numeric/NaN or <=0 value would make sleep() spin and hammer the server,
+  // so fall back to the 3000 ms default; otherwise floor positive values at a
+  // small minimum (tests set 5 ms for fast polling — the floor must not exceed it).
+  const rawInterval = Number.parseInt(process.env.ATTRIBUT_POLL_INTERVAL_MS, 10);
+  const interval = Number.isFinite(rawInterval) && rawInterval > 0 ? Math.max(5, rawInterval) : 3000;
   const deadline = Date.parse(expireAt) || Date.now() + 10 * 60 * 1000;
   let configs = null;
   while (Date.now() < deadline) {

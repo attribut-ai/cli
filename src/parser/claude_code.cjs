@@ -519,11 +519,12 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
     let o;
     try {
       o = JSON.parse(line);
-    } catch (err) {
-      // Fail loud: a corrupt transcript line is a real problem.
-      throw new Error(
-        `Malformed JSON in ${abs}: ${err.message} :: ${line.slice(0, 120)}`
-      );
+    } catch {
+      // Tolerate a single unparseable line rather than losing the whole session.
+      // These .jsonl files are live-appended by the agent, so a SessionEnd/Stop
+      // hook routinely observes a partial final line; skip it and keep going. A
+      // missing/unreadable FILE still surfaces (fs.readFileSync above throws).
+      continue;
     }
 
     if (o.sessionId && !sessionId) sessionId = o.sessionId;

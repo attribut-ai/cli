@@ -190,10 +190,12 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     let o;
     try {
       o = JSON.parse(line);
-    } catch (err) {
-      throw new Error(
-        `Malformed JSON in ${abs}: ${err.message} :: ${line.slice(0, 120)}`
-      );
+    } catch {
+      // Tolerate a single unparseable line rather than losing the whole session.
+      // transcript_full.jsonl is live-appended by the agent, so a hook routinely
+      // observes a partial final line; skip it and keep going. A missing/unreadable
+      // FILE still surfaces (fs.readFileSync above throws).
+      continue;
     }
 
     if (o.created_at) {

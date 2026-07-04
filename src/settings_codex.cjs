@@ -80,11 +80,33 @@ function backupConfig(p = codexConfigPath()) {
   return backup;
 }
 
-/** Write config.toml text (mode 0600 — it sits beside secrets in ~/.codex). */
+/**
+ * Atomically write `data` to `file` with the given mode: write a sibling temp
+ * (same dir → same filesystem, so rename is atomic), chmod it to defeat the umask,
+ * then rename over the live file. A crash mid-write can only leave the temp behind,
+ * never a truncated real config. Cleans up the temp on failure.
+ */
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
+/** Write config.toml text (mode 0600 — it sits beside secrets in ~/.codex).
+ * Atomic (temp + rename) so a crash mid-write can never truncate the live file. */
 function writeConfig(text, p = codexConfigPath()) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, text, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(p, 0o600);
+  writeFileAtomic(p, text, 0o600);
 }
 
 /**
