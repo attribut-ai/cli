@@ -315,7 +315,7 @@ function linkRelated(md, idByTitle, base) {
     .join("\n");
 }
 
-// The default help center's public origin (e.g. https://docs.attribut.ai), used
+// The default help center's public origin (e.g. https://help.attribut.ai), used
 // to build cross-links. Falls back to null (links then skipped) on any failure.
 async function helpCenterBase() {
   try {
