@@ -57,6 +57,15 @@ function endpoint() {
   return `${base}/v1/hook`;
 }
 
+// The ingest origin is env-overridable (ATTRIBUT_COLLECTOR_URL / INGEST_BASE), so
+// a controlled environment could redirect the Bearer token + telemetry elsewhere.
+// We still send (the override is a legitimate feature), but warn loudly to stderr
+// when the host is not the expected attribut.ai family — defense-in-depth against
+// silent exfiltration. Suppressed under the localhost test hatch.
+function isExpectedIngestHost(hostname) {
+  return hostname === 'attribut.ai' || hostname.endsWith('.attribut.ai');
+}
+
 // The bearer token for `agent`, read from its 0600 file (written by `attribut
 // install` / `attribut connect`). `attribut connect` stores a DISTINCT token per
 // agent; we resolve the right one from the hook's provider. A legacy single
@@ -127,6 +136,12 @@ function postEnvelope(envelope, agent) {
           `refusing to POST to non-https endpoint ${url.href} ` +
             '(set ATTRIBUT_ALLOW_INSECURE=1 only for local testing).'
         )
+      );
+    }
+    if (!allowInsecure && !isExpectedIngestHost(url.hostname)) {
+      process.stderr.write(
+        `[attribut] warning: POSTing token + telemetry to non-default ingest host ` +
+          `${url.hostname} (expected the attribut.ai host family).\n`
       );
     }
     const tok = token(agent);
@@ -202,23 +217,23 @@ function cloudContext() {
 // cursor and skip the parse+POST entirely. SessionEnd/Stop always full-parse, so
 // anything skipped here is still reconciled at session end.
 
-function cursorPath(sessionId) {
+function byteCursorPath(sessionId) {
   const safe = String(sessionId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
   return path.join(configDir(), 'cursor', safe);
 }
 
-function readCursor(sessionId) {
+function readByteCursor(sessionId) {
   try {
-    const n = parseInt(fs.readFileSync(cursorPath(sessionId), 'utf8').trim(), 10);
+    const n = parseInt(fs.readFileSync(byteCursorPath(sessionId), 'utf8').trim(), 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch {
     return 0;
   }
 }
 
-function writeCursor(sessionId, offset) {
+function writeByteCursor(sessionId, offset) {
   try {
-    const file = cursorPath(sessionId);
+    const file = byteCursorPath(sessionId);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, String(offset) + '\n', { encoding: 'utf8', mode: 0o600 });
   } catch {
@@ -227,9 +242,9 @@ function writeCursor(sessionId, offset) {
   }
 }
 
-function clearCursor(sessionId) {
+function clearByteCursor(sessionId) {
   try {
-    fs.unlinkSync(cursorPath(sessionId));
+    fs.unlinkSync(byteCursorPath(sessionId));
   } catch {
     /* absent — fine */
   }
@@ -245,19 +260,21 @@ function posttooluseCanSkip(hook) {
   try {
     const abs = parser.expandHome(tp);
     const size = fs.statSync(abs).size;
-    let offset = readCursor(hook.session_id);
+    let offset = readByteCursor(hook.session_id);
     if (offset > size) offset = 0; // transcript shrank/rotated → re-read from start
     if (size <= offset) {
       // Nothing new appended since last fire — nothing could have changed.
-      writeCursor(hook.session_id, size);
+      writeByteCursor(hook.session_id, size);
       return true;
     }
     const len = size - offset;
     const buf = Buffer.allocUnsafe(len);
     fd = fs.openSync(abs, 'r');
-    fs.readSync(fd, buf, 0, len, offset);
-    const tail = buf.toString('utf8');
-    writeCursor(hook.session_id, size);
+    // Use only the bytes actually read: if the file was truncated/rotated between
+    // statSync and readSync, `n < len` and the buffer tail is uninitialized memory.
+    const n = fs.readSync(fd, buf, 0, len, offset);
+    const tail = buf.subarray(0, n).toString('utf8');
+    writeByteCursor(hook.session_id, size);
     // Same trigger the parser uses: a `[branch sha]` commit line in the new bytes.
     parser.SHA_RE.lastIndex = 0;
     return !parser.SHA_RE.test(tail);
@@ -503,7 +520,7 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     // Nest this session's subagents (agy runs each as a separate conversation;
     // their standalone posts are suppressed in main()). Folds in their tokens
     // server-side. tp is the parent transcript.
-    payload.antigravity.subagents = agyParser.buildSubagents(tp, conversationId);
+    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId);
   } else {
     payload.antigravity.usage_raw = null;
   }
@@ -888,7 +905,7 @@ async function main() {
     // which the hook carries as conversation_id, not session_id.
     if (provider !== 'antigravity' && (trigger === 'sessionend' || trigger === 'stop')) {
       const sessionKey = provider === 'cursor' ? envelope.payload.sessionId : hook.session_id;
-      clearCursor(sessionKey);
+      clearByteCursor(sessionKey);
       clearCapturedShas(sessionKey);
     }
   } catch (err) {
@@ -898,14 +915,28 @@ async function main() {
   return 0;
 }
 
-// Top-level: any uncaught error is logged and exits 0 — telemetry must never
-// break the user's session.
+// Management subcommands are documented FAIL-LOUD (see install.cjs / connect.cjs):
+// an unexpected throw there must surface as a NON-ZERO exit, not be silently
+// reported as success. The hook hot path is the opposite — a telemetry failure
+// must NEVER block the user's session — so its uncaught errors stay exit-0.
+const MANAGEMENT_COMMANDS = new Set([
+  'install',
+  'uninstall',
+  'connect',
+  'heartbeat',
+  'audit',
+  'backfill',
+]);
+
+// Top-level: a normally-returned code is honored. An UNCAUGHT error is logged;
+// then we exit non-zero for the fail-loud management subcommands and exit 0 for
+// the hook hot path (telemetry must never break the user's session).
 if (require.main === module) {
   main()
     .then((code) => process.exit(typeof code === 'number' ? code : 0))
     .catch((err) => {
       log(`unexpected error: ${err && err.message ? err.message : err}`);
-      process.exit(0);
+      process.exit(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
     });
 }
 
@@ -919,9 +950,9 @@ module.exports = {
   buildCodexEnvelopeFromHook,
   buildCursorEnvelopeFromHook,
   postEnvelope,
-  cursorPath,
+  byteCursorPath,
   posttooluseCanSkip,
-  clearCursor,
+  clearByteCursor,
   isGitCommitCommand,
   commitDirFromCommand,
   revParseHead,

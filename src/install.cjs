@@ -305,7 +305,7 @@ function runInstall(argv) {
     let applied;
     try {
       const spec = buildAgyHookSpec({ collector, ingestBase });
-      applied = settingsAgy.applyAgyHook(spec);
+      applied = settingsAgy.applyAgyHooks(spec);
     } catch (e) {
       err(`Could not write hooks to ${settingsAgy.agyHooksPath()}: ${e.message}`);
       return 1;
@@ -330,7 +330,7 @@ function runInstall(argv) {
       return 1;
     }
     if (applied.backupPath) out(`  Backed up previous config → ${applied.backupPath}`);
-    out(`Registered PostToolUse + Stop hooks in ${applied.configPath}`);
+    out(`Registered PostToolUse + Stop hooks in ${applied.settingsPath}`);
     out(`  collector → ${collector}`);
     out(`  token     → ${tokenFile} (mode 0600)`);
     out('');
@@ -454,7 +454,7 @@ function runUninstall(argv) {
       return 0;
     }
     if (result.backupPath) out(`  Backed up previous config → ${result.backupPath}`);
-    out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.configPath}`);
+    out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath}`);
     out('ATTRIBUT capture hook removed (Codex).');
     return 0;
   }
@@ -533,7 +533,7 @@ function runUninstall(argv) {
  * Maps the agent slug to the provider this installer supports, writes the token
  * into the per-agent store, and merges the hooks in place (idempotent — same
  * dedupe path as runInstall). Throws (loud) for an agent we can't install or on
- * any settings/token write failure. Returns the `applyHooks`/`applyAgyHook`
+ * any settings/token write failure. Returns the `applyHooks`/`applyAgyHooks`
  * result ({ settingsPath, backupPath, ... }).
  */
 function registerAgent({ agent, token, ingestBase }) {
@@ -555,7 +555,7 @@ function registerAgent({ agent, token, ingestBase }) {
 
   if (provider === 'antigravity') {
     const spec = buildAgyHookSpec({ collector, ingestBase: base });
-    return settingsAgy.applyAgyHook(spec);
+    return settingsAgy.applyAgyHooks(spec);
   }
   if (provider === 'openai') {
     const specs = buildCodexHookSpecs({ collector, ingestBase: base });

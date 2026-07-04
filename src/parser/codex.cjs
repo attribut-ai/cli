@@ -43,6 +43,7 @@ const os = require('os');
 
 // Shared structural + SHA helpers live in the Claude parser (the canonical home).
 const {
+  cap,
   SHA_RE,
   branchFromBracketLine,
   classify,
@@ -52,12 +53,9 @@ const {
   expandHome,
 } = require('./claude_code.cjs');
 
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / effort / version / agent_type / role / status
-
-function cap(s, n) {
-  return typeof s === 'string' && s.length > n ? s.slice(0, n) : s;
-}
 
 // Scan a tool-output string for git-commit `[branch sha]` brackets. Returns
 // [{ sha, line }]. We scan ONLY the `output` field of a tool-result payload —
@@ -135,16 +133,40 @@ function accumulatePatchApply(payload, struct) {
 }
 
 // Read the session_meta payload from a rollout (first non-empty JSON line whose
-// type is session_meta). Returns the payload object, or null. Cheap: stops at the
-// first line. Never throws.
+// type is session_meta). Returns the payload object, or null. Cheap: reads only a
+// bounded PREFIX of the file (session_meta is always the first row) rather than the
+// whole rollout, which matters because this runs for EVERY rollout on disk on each
+// Codex session-end (via listSubagentRollouts). Never throws.
+const SESSION_META_PREFIX_BYTES = 64 * 1024;
+
 function readSessionMeta(rolloutPath) {
-  let raw;
+  let prefix;
+  let fd;
   try {
-    raw = fs.readFileSync(rolloutPath, 'utf8');
+    fd = fs.openSync(rolloutPath, 'r');
+    const buf = Buffer.allocUnsafe(SESSION_META_PREFIX_BYTES);
+    const n = fs.readSync(fd, buf, 0, SESSION_META_PREFIX_BYTES, 0);
+    prefix = buf.subarray(0, n).toString('utf8');
+    // If the buffer filled, its final line may be truncated. Keep only complete
+    // lines (up to the last newline); if there's NO newline at all, the first line
+    // is longer than the prefix — fall back to a full read for this file only.
+    if (n === SESSION_META_PREFIX_BYTES) {
+      const lastNl = prefix.lastIndexOf('\n');
+      if (lastNl === -1) prefix = fs.readFileSync(rolloutPath, 'utf8');
+      else prefix = prefix.slice(0, lastNl);
+    }
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
   }
-  for (const line of raw.split('\n')) {
+  for (const line of prefix.split('\n')) {
     const t = line.trim();
     if (!t) continue;
     let o;
@@ -212,8 +234,12 @@ function parseCodexRollout(rolloutPath, extra = {}) {
     let o;
     try {
       o = JSON.parse(line);
-    } catch (err) {
-      throw new Error(`Malformed JSON in ${abs}: ${err.message} :: ${line.slice(0, 120)}`);
+    } catch {
+      // Tolerate a single unparseable line rather than losing the whole rollout.
+      // Rollout .jsonl files are live-appended, so a Stop hook routinely observes
+      // a partial final line; skip it and keep going. A missing/unreadable FILE
+      // still surfaces (fs.readFileSync above throws).
+      continue;
     }
 
     const ts = o.timestamp;
@@ -325,7 +351,7 @@ function parseCodexRollout(rolloutPath, extra = {}) {
   // Strip the internal fold-only fields before the records enter the payload.
   const cleanSubagents = subagents.map(({ _commitSHA, _struct, ...rest }) => rest);
 
-  const model = models.size === 1 ? [...models][0] : models.size ? [...models][0] : null;
+  const model = models.size ? [...models][0] : null;
 
   const payload = {
     sessionId: extra.sessionId || sessionId,
@@ -337,7 +363,7 @@ function parseCodexRollout(rolloutPath, extra = {}) {
     started_at: tMin !== null ? new Date(tMin).toISOString() : null,
     ended_at: tMax !== null ? new Date(tMax).toISOString() : null,
     duration_ms: tMin !== null && tMax !== null ? tMax - tMin : null,
-    repo: extra.repo || repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(extra.repo || repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...mergedShas],
     num_turns: numTurns,
@@ -542,8 +568,19 @@ function resolveRolloutPath({ transcriptPath, sessionId } = {}) {
   if (matches.length === 0) {
     throw new Error(`No Codex rollout found for session_id=${sessionId} under ${root}`);
   }
-  matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-  return matches[0];
+  // Stat each path ONCE (not inside the comparator, which would stat O(n log n)
+  // times), then sort newest-first on the cached mtime.
+  const stated = matches.map((p) => {
+    let mtimeMs = 0;
+    try {
+      mtimeMs = fs.statSync(p).mtimeMs;
+    } catch {
+      /* vanished — sorts oldest */
+    }
+    return { path: p, mtimeMs };
+  });
+  stated.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return stated[0].path;
 }
 
 module.exports = {

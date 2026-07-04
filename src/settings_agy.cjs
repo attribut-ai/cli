@@ -42,7 +42,7 @@ function agyHooksPath() {
  * input. Replaces our named entry in place (idempotent); preserves every other
  * named hook. Returns a NEW object. Pure — no I/O.
  */
-function mergeAgyHook(existing, spec, name = AGY_HOOK_NAME) {
+function mergeAgyHooks(existing, spec, name = AGY_HOOK_NAME) {
   const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
   return { ...base, [name]: spec };
 }
@@ -64,10 +64,10 @@ function removeAgyHook(existing, name = AGY_HOOK_NAME) {
  * Full install apply: read → backup → merge → write. Returns
  * { backupPath, settingsPath, merged }.
  */
-function applyAgyHook(spec, p = agyHooksPath(), name = AGY_HOOK_NAME) {
+function applyAgyHooks(spec, p = agyHooksPath(), name = AGY_HOOK_NAME) {
   const existing = readSettings(p);
   const backupPath = backupSettings(p);
-  const merged = mergeAgyHook(existing, spec, name);
+  const merged = mergeAgyHooks(existing, spec, name);
   writeSettings(merged, p);
   return { backupPath, settingsPath: p, merged };
 }
@@ -91,8 +91,8 @@ function applyAgyUninstall(p = agyHooksPath(), name = AGY_HOOK_NAME) {
 module.exports = {
   AGY_HOOK_NAME,
   agyHooksPath,
-  mergeAgyHook,
+  mergeAgyHooks,
   removeAgyHook,
-  applyAgyHook,
+  applyAgyHooks,
   applyAgyUninstall,
 };

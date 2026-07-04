@@ -180,17 +180,24 @@ function collectVarints(buf, prefix, out, depth) {
 
 // Central helper to load a SQLite database driver class.
 // Mimics Node's `DatabaseSync` interface so that we support both node:sqlite and better-sqlite3 seamlessly.
+// Memoized: driver availability can't change mid-process, so the `require` resolution
+// (including a permanent null when no driver exists) is cached after the first call.
+let _databaseClass; // undefined = not yet resolved; null = resolved-unavailable
 function getDatabaseClass() {
+  if (_databaseClass !== undefined) return _databaseClass;
   try {
     const { DatabaseSync } = require('node:sqlite');
-    if (DatabaseSync) return DatabaseSync;
+    if (DatabaseSync) {
+      _databaseClass = DatabaseSync;
+      return _databaseClass;
+    }
   } catch {
     /* fallback to better-sqlite3 */
   }
 
   try {
     const BetterSqlite3 = require('better-sqlite3');
-    return class DatabaseSyncFallback {
+    _databaseClass = class DatabaseSyncFallback {
       constructor(path, options) {
         const readonly = !!(options && options.readOnly);
         this.db = new BetterSqlite3(path, { readonly });
@@ -213,37 +220,45 @@ function getDatabaseClass() {
         this.db.close();
       }
     };
+    return _databaseClass;
   } catch {
-    return null;
+    _databaseClass = null; // no driver available — cache the negative result
+    return _databaseClass;
   }
 }
 
 // --- public API --------------------------------------------------------------
 
-// Read usage_raw for a conversation. Returns a { "<path>": int } object, or null
-// on ANY failure (missing/locked/corrupt DB, SQLite unavailable, no rows,
-// nothing extractable). NEVER throws.
-function readUsageRaw(conversationId) {
+// Open the conversation DB ONCE and derive BOTH the usage_raw map and the model
+// id from a SINGLE pass over gen_metadata. readUsageRaw + readModel previously
+// opened + scanned these same rows separately; on the collector path that ran 3-4×
+// per session (parent + each child), so one combined pass halves the work per call.
+// Returns { usageRaw, model } — either may be null. READ-ONLY, fail-safe; never throws.
+function readGenMetadata(conversationId) {
   const DatabaseSync = getDatabaseClass();
-  if (!DatabaseSync) return null; // SQLite unavailable — degrade silently
+  if (!DatabaseSync) return { usageRaw: null, model: null };
 
   const dbPath = dbPathFor(conversationId);
-  if (!dbPath || !fs.existsSync(dbPath)) return null;
+  if (!dbPath || !fs.existsSync(dbPath)) return { usageRaw: null, model: null };
 
   let db = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    // One row per generation; SUM each varint path across the small usage rows
-    // to get session totals (per-turn usage, like the Claude collector). The big
-    // context/embedding rows are skipped by size.
+    // One row per generation; SUM each varint path across the small usage rows to
+    // get session totals (per-turn usage, like the Claude collector), and tally the
+    // model-id-shaped tokens in the same pass. The big context/embedding rows are
+    // skipped by size (they are model context, not usage/model labels).
     const rows = db.prepare('SELECT data FROM gen_metadata ORDER BY idx').all();
     const total = {};
+    const modelCounts = new Map();
     for (const row of rows) {
       const blob = row && row.data;
       if (!blob || !(blob instanceof Uint8Array)) continue;
-      if (blob.length > MAX_ROW_BYTES) continue; // embedding dump — not usage
+      if (blob.length > MAX_ROW_BYTES) continue; // embedding dump — not usage/model
+      const b = Buffer.from(blob);
+      // usage: sum each varint path across the small usage rows.
       const perRow = {};
-      collectVarints(Buffer.from(blob), '', perRow, 0);
+      collectVarints(b, '', perRow, 0);
       for (const [k, v] of Object.entries(perRow)) {
         if (k in total) {
           if (total[k] + v <= Number.MAX_SAFE_INTEGER) total[k] += v;
@@ -251,10 +266,27 @@ function readUsageRaw(conversationId) {
           total[k] = v;
         }
       }
+      // model: count each model-id-shaped token; most-frequent wins below.
+      const text = b.toString('latin1');
+      MODEL_ID_SCAN_RE.lastIndex = 0;
+      let m;
+      while ((m = MODEL_ID_SCAN_RE.exec(text)) !== null) {
+        const id = m[0].toLowerCase();
+        modelCounts.set(id, (modelCounts.get(id) || 0) + 1);
+      }
     }
-    return Object.keys(total).length > 0 ? total : null;
+    const usageRaw = Object.keys(total).length > 0 ? total : null;
+    let model = null;
+    let bestN = -1;
+    for (const [id, n] of modelCounts) {
+      if (n > bestN) {
+        model = id;
+        bestN = n;
+      }
+    }
+    return { usageRaw, model: model ? model.slice(0, 64) : null };
   } catch {
-    return null; // locked / corrupt / schema drift — fail safe
+    return { usageRaw: null, model: null }; // locked / corrupt / schema drift — fail safe
   } finally {
     if (db) {
       try {
@@ -264,6 +296,13 @@ function readUsageRaw(conversationId) {
       }
     }
   }
+}
+
+// Read usage_raw for a conversation. Returns a { "<path>": int } object, or null
+// on ANY failure (missing/locked/corrupt DB, SQLite unavailable, no rows,
+// nothing extractable). NEVER throws. Thin wrapper over the combined single pass.
+function readUsageRaw(conversationId) {
+  return readGenMetadata(conversationId).usageRaw;
 }
 
 // The resolved model id is the ONE allowlisted label we read from the DB (like
@@ -272,57 +311,14 @@ function readUsageRaw(conversationId) {
 // commit-SHA extraction — nothing but a model id can ever be emitted. The id is
 // the internal one Antigravity stamps per generation (e.g. `gemini-3-flash-a`),
 // which is exactly the key the server's pricing table uses.
-const MODEL_ID_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
+const MODEL_ID_SCAN_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
 
-// Read the resolved model id for a conversation, or null. Scans the small
-// per-generation gen_metadata rows for a model-id-shaped token and returns the
-// most frequent one. READ-ONLY, fail-safe (never throws).
+// Read the resolved model id for a conversation, or null. Delegates to the
+// combined single pass, which tallies model-id-shaped tokens across the small
+// per-generation gen_metadata rows and returns the most frequent one. READ-ONLY,
+// fail-safe (never throws).
 function readModel(conversationId) {
-  const DatabaseSync = getDatabaseClass();
-  if (!DatabaseSync) return null;
-
-  const dbPath = dbPathFor(conversationId);
-  if (!dbPath || !fs.existsSync(dbPath)) return null;
-
-  let db = null;
-  try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
-    const rows = db.prepare('SELECT data FROM gen_metadata ORDER BY idx').all();
-    const counts = new Map();
-    for (const row of rows) {
-      const blob = row && row.data;
-      if (!blob || !(blob instanceof Uint8Array)) continue;
-      if (blob.length > MAX_ROW_BYTES) continue; // skip embedding dumps
-      const text = Buffer.from(blob).toString('latin1');
-      MODEL_ID_RE.lastIndex = 0;
-      let m;
-      while ((m = MODEL_ID_RE.exec(text)) !== null) {
-        const id = m[0].toLowerCase();
-        counts.set(id, (counts.get(id) || 0) + 1);
-      }
-    }
-    if (counts.size === 0) return null;
-    // Most frequent wins (the per-generation model); cap length defensively.
-    let best = null;
-    let bestN = -1;
-    for (const [id, n] of counts) {
-      if (n > bestN) {
-        best = id;
-        bestN = n;
-      }
-    }
-    return best ? best.slice(0, 64) : null;
-  } catch {
-    return null;
-  } finally {
-    if (db) {
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-    }
-  }
+  return readGenMetadata(conversationId).model;
 }
 
 // The generated session title — a short, model-produced summary (Title Case,
@@ -383,9 +379,19 @@ function collectStringsAtPath(buf, prefix, target, out) {
   }
 }
 
+// A generated title is a single-line summary. Reject any candidate that is
+// multi-line or carries control characters — those shapes signal we have drifted
+// off TITLE_PATH onto prompt/response or code body text (e.g. an upstream agy
+// protobuf-field renumber), which must NEVER leave the machine. Defense-in-depth
+// on top of TITLE_PATH being the empirically verified title location.
+function looksLikeTitle(s) {
+  return typeof s === 'string' && s.length > 0 && !/[\x00-\x1f\x7f]/.test(s);
+}
+
 // Read the generated session title for a conversation, or null. Scans the steps'
 // step_payload for the string at TITLE_PATH and returns the latest non-empty one
-// (the title is refined as the session grows). READ-ONLY, fail-safe.
+// that passes the title shape-guard (the title is refined as the session grows).
+// READ-ONLY, fail-safe.
 function readTitle(conversationId) {
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return null;
@@ -403,8 +409,11 @@ function readTitle(conversationId) {
       if (!blob || !(blob instanceof Uint8Array)) continue;
       const out = [];
       collectStringsAtPath(Buffer.from(blob), '', TITLE_PATH, out);
-      // Latest non-empty wins.
-      for (const s of out) if (s && s.trim()) title = s;
+      // Latest non-empty, title-shaped candidate wins.
+      for (const s of out) {
+        const t = s && s.trim();
+        if (t && looksLikeTitle(t)) title = t;
+      }
     }
     return title ? title.slice(0, 200) : null;
   } catch {
@@ -586,6 +595,7 @@ module.exports = {
   looksLikeMessage,
   collectVarints,
   collectStringsAtPath,
+  looksLikeTitle,
   readUsageRaw,
   readModel,
   readTitle,

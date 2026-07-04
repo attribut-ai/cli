@@ -43,7 +43,7 @@ free-form string is length-capped before it is sent.
 | `model` | primary model id |
 | `tokens_in` / `tokens_out` | summed input / output tokens |
 | `started_at` / `ended_at` / `duration_ms` | session timing |
-| `repo` | the working-directory path (the hook's `cwd`); capped at 256 chars |
+| `repo` | the working-directory path (the hook's `cwd`); capped at 2000 chars (see below) |
 | `branch` | git branch |
 | `commitSHA` | deduped list of commit SHAs from `git commit` stdout |
 | `num_turns` / `num_tool_calls` | assistant turn + tool-call counts |
@@ -56,7 +56,16 @@ free-form string is length-capped before it is sent.
 | `claude_code.subagents[]` | per-invocation subagent token + label metadata |
 
 > `repo` is the absolute working-directory path, so it includes your OS
-> username and directory layout. It is used server-side as repo identity.
+> username and directory layout. It is used server-side as repo identity. It is
+> capped at 2000 chars — generous enough for very long folder paths, but still
+> bounded (it is the one field with a looser cap than the other free-form strings).
+
+The table above lists the Claude Code payload. Other supported tools share the
+same agnostic fields; a few carry a tool-scoped identity value the tool itself
+exposes — notably Cursor's `cursor.user_email` (the signed-in Cursor account
+email). Like everything else it is defined in the [schema](src/contract/envelope.schema.json)
+and sent only to your own ingest over TLS. The one model-generated free-text value
+that ever leaves the machine is `title` (a ≤200-char session summary).
 
 ### `device_uuid`
 

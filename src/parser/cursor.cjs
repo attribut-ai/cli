@@ -46,17 +46,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { expandHome } = require('./claude_code.cjs');
+const { cap, expandHome } = require('./claude_code.cjs');
 const { getDatabaseClass } = require('./antigravity_tokens.cjs');
 
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / version / reason
 const CAP_EMAIL = 320; // RFC-ish upper bound; the schema caps at 320
 const MAX_SUBAGENTS = 64; // sanity bound on subComposerIds fan-out
-
-function cap(s, n) {
-  return typeof s === 'string' && s.length > n ? s.slice(0, n) : s;
-}
 
 function intOrNull(v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
@@ -71,29 +68,30 @@ function numOrNull(v) {
 // A model id is a structured config value, never free text — but we still gate it
 // so nothing but an id-shaped token can ever leave: a single word, no whitespace,
 // vendor-id charset, length-capped. "default" (Cursor's unresolved placeholder) and
-// anything that fails the shape map to null. Same discipline as the agy MODEL_ID_RE.
-const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// anything that fails the shape map to null. This is an ANCHORED single-token
+// VALIDATION regex (distinct from the agy token module's global model-id SCANNER).
+const MODEL_ID_VALIDATE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 function modelOrNull(v) {
   if (typeof v !== 'string') return null;
   const s = v.trim();
   if (!s || s === 'default') return null;
-  return MODEL_ID_RE.test(s) ? s : null;
+  return MODEL_ID_VALIDATE_RE.test(s) ? s : null;
 }
 
-/** Default Cursor state DB path. Override via CURSOR_STATE_DB (used in tests). */
+/** Default Cursor state DB path (platform-branched, mirroring machine_id.cjs).
+ * Override via CURSOR_STATE_DB (used in tests). */
 function stateDbPath() {
-  return (
-    process.env.CURSOR_STATE_DB ||
-    path.join(
-      os.homedir(),
-      'Library',
-      'Application Support',
-      'Cursor',
-      'User',
-      'globalStorage',
-      'state.vscdb'
-    )
-  );
+  if (process.env.CURSOR_STATE_DB) return process.env.CURSOR_STATE_DB;
+  const tail = ['Cursor', 'User', 'globalStorage', 'state.vscdb'];
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, ...tail);
+  }
+  if (process.platform === 'linux') {
+    return path.join(os.homedir(), '.config', ...tail);
+  }
+  // darwin (and any other) → the macOS location.
+  return path.join(os.homedir(), 'Library', 'Application Support', ...tail);
 }
 
 /** Open the state DB read-only. Returns null on any failure (SQLite unavailable,
@@ -304,7 +302,7 @@ function isoOrNull(ms) {
 }
 
 // Build one subagent record from a child composer's row (numbers + model only).
-function buildSubagent(db, composerId) {
+function buildCursorSubagent(db, composerId) {
   const row = readComposerRow(db, composerId);
   const cd = pickComposerFields(row);
   if (!cd) return null;
@@ -350,7 +348,7 @@ function parseCursorSession(extra = {}) {
         tok = readBubbleTokens(db, composerId, cd.orderedBubbleIds);
         if (extra.withSubagents !== false && cd.subComposerIds.length) {
           for (const sub of cd.subComposerIds) {
-            const rec = buildSubagent(db, sub);
+            const rec = buildCursorSubagent(db, sub);
             if (rec) subagents.push(rec);
           }
         }
@@ -392,7 +390,7 @@ function parseCursorSession(extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: extra.repo || null,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(extra.repo || null, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(extra.branch || null, CAP_PATH),
     commitSHA: [],
     num_turns: numTurns,

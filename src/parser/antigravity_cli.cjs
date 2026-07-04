@@ -30,6 +30,7 @@ const path = require('path');
 // classification, comment-syntax lookup, the structural accumulator, the git
 // commit SHA regex, the bracket-branch helper, and ~ expansion.
 const {
+  cap,
   classify,
   syntaxForPath,
   isGeneratedPath,
@@ -43,12 +44,9 @@ const agyTokens = require('./antigravity_tokens.cjs');
 
 // String caps, mirroring the schema's maxLength bounds (defense-in-depth).
 const CAP_TITLE = 200;
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
+const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / version / reason / agent_type / status
-
-function cap(s, n) {
-  return typeof s === 'string' && s.length > n ? s.slice(0, n) : s;
-}
 
 // Split content into lines, dropping the spurious empty element a trailing
 // newline produces (so an N-line block counts as N lines).
@@ -152,16 +150,18 @@ function accumulateFileChange(toolCall, struct) {
 
 // Extract git commit SHAs from a RUN_COMMAND result step's `content`. The
 // content is command OUTPUT (stdout-equivalent); a `git commit` prints
-// `[branch sha] subject`. We emit ONLY the SHA + branch — never the content.
-function shasFromRunCommand(content, shaSet, branchSet) {
-  if (typeof content !== 'string') return;
+// `[branch sha] subject`. Returns [{ sha, line }] — same contract as the Claude
+// (extractShasFromToolResult) and Codex (extractShasFromOutput) siblings. Emits
+// ONLY the SHA + its bracket line, never the surrounding content.
+function extractShasFromRunCommand(content) {
+  const found = [];
+  if (typeof content !== 'string') return found;
   SHA_RE.lastIndex = 0;
   let m;
   while ((m = SHA_RE.exec(content)) !== null) {
-    shaSet.add(m[1]);
-    const b = branchFromBracketLine(m[0]);
-    if (b) branchSet.add(b);
+    found.push({ sha: m[1], line: m[0] });
   }
+  return found;
 }
 
 // Parse a single agy `transcript_full.jsonl` into the contract antigravity
@@ -189,10 +189,12 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     let o;
     try {
       o = JSON.parse(line);
-    } catch (err) {
-      throw new Error(
-        `Malformed JSON in ${abs}: ${err.message} :: ${line.slice(0, 120)}`
-      );
+    } catch {
+      // Tolerate a single unparseable line rather than losing the whole session.
+      // transcript_full.jsonl is live-appended by the agent, so a hook routinely
+      // observes a partial final line; skip it and keep going. A missing/unreadable
+      // FILE still surfaces (fs.readFileSync above throws).
+      continue;
     }
 
     if (o.created_at) {
@@ -229,7 +231,11 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
 
     // git commit SHAs live in RUN_COMMAND result content (command output).
     if (o.type === 'RUN_COMMAND') {
-      shasFromRunCommand(o.content, shaSet, bracketBranches);
+      for (const hit of extractShasFromRunCommand(o.content)) {
+        shaSet.add(hit.sha);
+        const b = branchFromBracketLine(hit.line);
+        if (b) bracketBranches.add(b);
+      }
     }
   }
 
@@ -262,7 +268,7 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     started_at: startedAt,
     ended_at: endedAt,
     duration_ms: durationMs,
-    repo: repo,   // UNBOUNDED: full cwd/path (folder->org attribution)
+    repo: cap(repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
     commitSHA: [...shaSet],
     num_turns: numTurns,
@@ -394,7 +400,7 @@ function childStats(childTranscriptPath) {
 // total tool_use_count, semantic input/output tokens, and the child's session
 // window (started_at/ended_at/duration_ms from its own transcript). Numbers +
 // content-safe labels only. Returns [] if none / on any failure (never throws).
-function buildSubagents(parentTranscriptPath, parentConversationId) {
+function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
   try {
     const children = agyTokens.findChildren(parentConversationId);
     if (!children.length) return [];
@@ -430,9 +436,9 @@ module.exports = {
   accumulateFileChange,
   applyReplace,
   trimCommon,
-  shasFromRunCommand,
+  extractShasFromRunCommand,
   parseAntigravityTranscript,
   extractSubagentDecls,
   brainTranscriptPath,
-  buildSubagents,
+  buildAntigravitySubagents,
 };

@@ -193,15 +193,36 @@ function backupSettings(p = settingsPath()) {
 }
 
 /**
+ * Atomically write `data` to `file` with the given mode: write a sibling temp
+ * file (same dir → same filesystem, so rename is atomic), chmod it to defeat the
+ * umask (mode-on-create is masked), then rename over the live file. A crash/kill
+ * mid-write can only ever leave the temp behind — never a truncated real file.
+ * Cleans up the temp on failure.
+ */
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode); // mode-on-create is masked by umask; force it
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
+/**
  * Write a settings object as pretty JSON (mode 0600 — it sits beside secrets),
- * creating parent dirs as needed.
+ * creating parent dirs as needed. Atomic (temp + rename) so a crash mid-write
+ * can never truncate the live settings.json.
  */
 function writeSettings(settings, p = settingsPath()) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(settings, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  // writeFileSync's `mode` only applies when CREATING the file — an existing
-  // settings.json keeps its old perms. chmod unconditionally so the guarantee holds.
-  fs.chmodSync(p, 0o600);
+  writeFileAtomic(p, JSON.stringify(settings, null, 2) + '\n', 0o600);
 }
 
 /**

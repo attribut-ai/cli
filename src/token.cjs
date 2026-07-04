@@ -32,6 +32,26 @@ function tokenPath() {
   return path.join(configDir(), 'token');
 }
 
+// Atomically write `data` to `file` with `mode`: write a sibling temp (same dir →
+// same filesystem, so rename is atomic), chmod to defeat the umask, then rename
+// over the live file. A crash mid-write can only leave the temp behind, never a
+// truncated real token file. Cleans up the temp on failure.
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
 // Parse the on-disk token file into either a bare string or a map. Returns
 // { bare } for a legacy single token, { map } for the JSON form, or null when
 // absent/empty/unreadable.
@@ -80,7 +100,7 @@ function writeToken(key, agent) {
   const file = tokenPath();
   fs.mkdirSync(configDir(), { recursive: true });
   if (!agent) {
-    fs.writeFileSync(file, String(key).trim() + '\n', { encoding: 'utf8', mode: 0o600 });
+    writeFileAtomic(file, String(key).trim() + '\n', 0o600);
     return file;
   }
   const parsed = readRaw();
@@ -88,7 +108,7 @@ function writeToken(key, agent) {
   if (parsed && parsed.map) map = parsed.map;
   else if (parsed && parsed.bare) map = { claude_code: parsed.bare };
   map[agent] = String(key).trim();
-  fs.writeFileSync(file, JSON.stringify(map) + '\n', { encoding: 'utf8', mode: 0o600 });
+  writeFileAtomic(file, JSON.stringify(map) + '\n', 0o600);
   return file;
 }
 
@@ -104,10 +124,7 @@ function removeToken(agent) {
     if (Object.keys(parsed.map).length === 0) {
       fs.unlinkSync(tokenPath());
     } else {
-      fs.writeFileSync(tokenPath(), JSON.stringify(parsed.map) + '\n', {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
+      writeFileAtomic(tokenPath(), JSON.stringify(parsed.map) + '\n', 0o600);
     }
     return true;
   }

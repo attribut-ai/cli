@@ -40,3 +40,27 @@ test('schema rejects an over-length string (defense-in-depth)', () => {
     /contract validation/
   );
 });
+
+test('parser truncates an over-long repo path to the 2000-char cap', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-bounds-'));
+  const tp = path.join(dir, 't.jsonl');
+  const longRepo = '/' + 'r'.repeat(3000); // pathological cwd, well past the cap
+  fs.writeFileSync(
+    tp,
+    JSON.stringify({ type: 'assistant', sessionId: 'sx', cwd: longRepo, message: { model: 'm' } }) +
+      '\n',
+    'utf8'
+  );
+  const payload = parser.parseClaudeCodeTranscript(tp);
+  assert.equal(payload.repo.length, 2000);
+  assert.ok(longRepo.startsWith(payload.repo));
+});
+
+test('schema rejects a repo over the 2000-char cap (defense-in-depth)', () => {
+  const payload = parser.parseClaudeCodeTranscript(FIXTURE);
+  payload.repo = 'x'.repeat(2001); // bypass the parser cap to prove the schema also guards
+  assert.throws(
+    () => buildAndValidate(payload, { _trigger: 'sessionend', _source: 'cli' }),
+    /contract validation/
+  );
+});

@@ -80,18 +80,40 @@ function backupConfig(p = codexConfigPath()) {
   return backup;
 }
 
-/** Write config.toml text (mode 0600 — it sits beside secrets in ~/.codex). */
+/**
+ * Atomically write `data` to `file` with the given mode: write a sibling temp
+ * (same dir → same filesystem, so rename is atomic), chmod it to defeat the umask,
+ * then rename over the live file. A crash mid-write can only leave the temp behind,
+ * never a truncated real config. Cleans up the temp on failure.
+ */
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
+/** Write config.toml text (mode 0600 — it sits beside secrets in ~/.codex).
+ * Atomic (temp + rename) so a crash mid-write can never truncate the live file. */
 function writeConfig(text, p = codexConfigPath()) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, text, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(p, 0o600);
+  writeFileAtomic(p, text, 0o600);
 }
 
 /**
  * Full install apply: read → backup → upsert each event's array-of-tables →
  * write. `specsByEvent` maps "hooks.PostToolUse"/"hooks.Stop" → [spec]. `isOurs`
  * identifies our prior entries to replace (ownership by collector path in the
- * command text). Returns { backupPath, configPath }.
+ * command text). Returns { backupPath, settingsPath }.
  */
 function applyCodexHooks(specsByEvent, isOurs, p = codexConfigPath()) {
   const existing = readConfig(p);
@@ -102,12 +124,12 @@ function applyCodexHooks(specsByEvent, isOurs, p = codexConfigPath()) {
     next = upsertArrayTables(next, event, specs, isOurs);
   }
   writeConfig(next, p);
-  return { backupPath, configPath: p };
+  return { backupPath, settingsPath: p };
 }
 
 /**
  * Full uninstall apply: read → (backup + write only if our entries were present).
- * Returns { backupPath, configPath, removed }. A no-op when nothing matched.
+ * Returns { backupPath, settingsPath, removed }. A no-op when nothing matched.
  */
 function applyCodexUninstall(isOurs, p = codexConfigPath()) {
   const existing = readConfig(p);
@@ -119,11 +141,11 @@ function applyCodexUninstall(isOurs, p = codexConfigPath()) {
     removed += res.removed;
   }
   if (removed === 0) {
-    return { backupPath: null, configPath: p, removed: 0 };
+    return { backupPath: null, settingsPath: p, removed: 0 };
   }
   const backupPath = backupConfig(p);
   writeConfig(next, p);
-  return { backupPath, configPath: p, removed };
+  return { backupPath, settingsPath: p, removed };
 }
 
 module.exports = {

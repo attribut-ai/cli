@@ -37,15 +37,15 @@ test('buildAgyHookSpec registers a PostToolUse command hook with --provider', ()
   assert.match(handler.command, /collector\.cjs/);
 });
 
-test('applyAgyHook writes our named hook; idempotent re-run does not duplicate', () => {
+test('applyAgyHooks writes our named hook; idempotent re-run does not duplicate', () => {
   withHooksFile((p) => {
-    settingsAgy.applyAgyHook(SPEC);
+    settingsAgy.applyAgyHooks(SPEC);
     let onDisk = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.ok(onDisk[settingsAgy.AGY_HOOK_NAME], 'named hook present');
     assert.strictEqual(Object.keys(onDisk).length, 1);
 
     // Re-run → still exactly one named entry (replaced in place).
-    settingsAgy.applyAgyHook(SPEC);
+    settingsAgy.applyAgyHooks(SPEC);
     onDisk = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.strictEqual(Object.keys(onDisk).length, 1);
     assert.ok(onDisk[settingsAgy.AGY_HOOK_NAME].PostToolUse);
@@ -56,7 +56,7 @@ test('merge preserves OTHER named hooks; uninstall removes only ours', () => {
   withHooksFile((p) => {
     // Seed a foreign hook the user owns.
     fs.writeFileSync(p, JSON.stringify({ 'user-thing': { Stop: [] } }));
-    settingsAgy.applyAgyHook(SPEC);
+    settingsAgy.applyAgyHooks(SPEC);
     let onDisk = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.ok(onDisk['user-thing'], 'foreign hook preserved');
     assert.ok(onDisk[settingsAgy.AGY_HOOK_NAME], 'our hook added');
