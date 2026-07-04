@@ -441,6 +441,44 @@ function resolveComposerId({ conversationId, transcriptPath } = {}) {
   return null;
 }
 
+// List EVERY top-level Cursor composer (session) from an open state.vscdb handle,
+// excluding sub-composers (children referenced in some parent's subComposerIds).
+// Returns [{ composerId, createdAt, lastUpdatedAt }] newest-first (lastUpdatedAt
+// then createdAt). READ-ONLY, fail-safe → [] on any error. Never throws.
+function listComposerIds(db) {
+  if (!db) return [];
+  let rows;
+  try {
+    rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'").all();
+  } catch {
+    return [];
+  }
+  const prefix = 'composerData:';
+  const items = [];
+  const childIds = new Set();
+  for (const row of rows) {
+    if (!row || typeof row.key !== 'string' || typeof row.value !== 'string') continue;
+    const composerId = row.key.slice(prefix.length);
+    let o;
+    try {
+      o = JSON.parse(row.value);
+    } catch {
+      continue;
+    }
+    const createdAt = intOrNull(o && o.createdAt);
+    const lastUpdatedAt = intOrNull(o && o.lastUpdatedAt);
+    if (o && Array.isArray(o.subComposerIds)) {
+      for (const c of o.subComposerIds) {
+        if (typeof c === 'string') childIds.add(c);
+      }
+    }
+    items.push({ composerId, createdAt, lastUpdatedAt });
+  }
+  const out = items.filter((it) => !childIds.has(it.composerId));
+  out.sort((a, b) => (b.lastUpdatedAt || b.createdAt || 0) - (a.lastUpdatedAt || a.createdAt || 0));
+  return out;
+}
+
 module.exports = {
   stateDbPath,
   openStateDb,
@@ -451,4 +489,5 @@ module.exports = {
   parseCursorSession,
   resolveComposerId,
   modelOrNull,
+  listComposerIds,
 };

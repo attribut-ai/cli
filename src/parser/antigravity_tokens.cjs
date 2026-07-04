@@ -546,6 +546,39 @@ function readAgentType(conversationId, candidateNames) {
   }
 }
 
+// List EVERY top-level agy conversation id (subagent children excluded — they
+// fold into their parent). Returns [{ id, mtimeMs }] newest-first by mtime.
+// READ-ONLY, fail-safe → [] on any error. Never throws.
+function listConversationIds() {
+  let entries;
+  try {
+    entries = fs.readdirSync(conversationsDir());
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of entries) {
+    if (!name.endsWith('.db')) continue;
+    const id = name.slice(0, -3);
+    let parentId;
+    try {
+      parentId = readParentId(id);
+    } catch {
+      parentId = null; // failed lookup → don't drop a real session, include it
+    }
+    if (parentId) continue; // has a parent → subagent child, exclude
+    let mtimeMs;
+    try {
+      mtimeMs = fs.statSync(dbPathFor(id)).mtimeMs;
+    } catch {
+      continue; // stat failed → skip this id
+    }
+    out.push({ id, mtimeMs });
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out;
+}
+
 module.exports = {
   conversationsDir,
   dbPathFor,
@@ -561,5 +594,6 @@ module.exports = {
   findChildren,
   readAgentType,
   getDatabaseClass,
+  listConversationIds,
   TITLE_PATH,
 };
