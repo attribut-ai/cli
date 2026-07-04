@@ -286,6 +286,57 @@ test('runBackfill: unknown agent returns exit 2 and posts nothing', async () => 
 });
 
 // =============================================================================
+// fail-safe: a session's POST failure is counted, never aborts the batch
+// =============================================================================
+
+// Ingest stand-in that 500s every request (records that the POST was attempted).
+function startFailingIngest() {
+  const captured = [];
+  const srv = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      captured.push({ url: req.url });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"error":"nope"}');
+    });
+  });
+  return { srv, captured };
+}
+
+test('runBackfill: a failing POST is fail-safe — batch still exits 0, POST was attempted', async () => {
+  const { srv, captured } = startFailingIngest();
+  const port = await listen(srv);
+  const prevSessDir = process.env.CODEX_SESSIONS_DIR;
+  const prevIngest = process.env.INGEST_BASE;
+  process.env.CODEX_SESSIONS_DIR = CODEX_FIX_DIR;
+  process.env.INGEST_BASE = `http://127.0.0.1:${port}`;
+  tokenStore.writeToken('tok-fail', 'codex');
+  try {
+    const code = await runBackfill(['--agents=codex', '--all', '--yes']);
+    assert.equal(code, 0); // one session's POST failure must never fail the command
+    assert.equal(captured.length, 1); // the POST was attempted (not aborted before sending)
+  } finally {
+    if (prevSessDir === undefined) delete process.env.CODEX_SESSIONS_DIR;
+    else process.env.CODEX_SESSIONS_DIR = prevSessDir;
+    if (prevIngest === undefined) delete process.env.INGEST_BASE;
+    else process.env.INGEST_BASE = prevIngest;
+    tokenStore.removeToken('codex');
+    await close(srv);
+  }
+});
+
+// =============================================================================
+// --since with no value → usage error (fail loud, like --agents)
+// =============================================================================
+
+test('runBackfill: --since with no value returns exit 2 (usage error), posts nothing', async () => {
+  // Exits at the --since guard before any scan/enumerate/POST — no server needed.
+  const code = await runBackfill(['--agents=codex', '--since']);
+  assert.equal(code, 2);
+});
+
+// =============================================================================
 // runBackfillInteractive: non-TTY skip (the case under `node --test`)
 // =============================================================================
 
