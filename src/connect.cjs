@@ -31,7 +31,6 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
-const readline = require('readline');
 const { spawn } = require('child_process');
 const { URL } = require('url');
 
@@ -254,7 +253,7 @@ async function resolveAgents(opts) {
 async function numberedSelect() {
   out('Which tools on this device should ATTRIBUT capture?');
   AGENTS.forEach((a, i) => out(`  ${i + 1}) ${a.label}  [${a.slug}]`));
-  const answer = await prompt(
+  const answer = await ui.ask(
     `Enter numbers to connect (comma-separated, default all = 1-${AGENTS.length}): `
   );
   const picked = answer.trim()
@@ -276,15 +275,6 @@ function validateAgents(list) {
   return [...new Set(ok)];
 }
 
-function prompt(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (ans) => {
-      rl.close();
-      resolve(ans);
-    });
-  });
-}
 
 // Best-effort open the verification URL in a browser. Never throws; returns true
 // only if a launcher was spawned. Suppressed by --no-browser / ATTRIBUT_NO_BROWSER

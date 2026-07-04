@@ -32,12 +32,22 @@
 // command (bad flags, bad --since) fail loud with a non-zero exit, same as
 // audit.cjs / connect.cjs.
 
-const readline = require('readline');
+const http = require('http');
+const https = require('https');
+const os = require('os');
 
 const collector = require('./collector.cjs');
 const { readToken } = require('./token.cjs');
 const { allTranscripts } = require('./audit.cjs');
 const ui = require('./ui.cjs');
+
+// Replace the running user's home dir with `~` in a message before it hits
+// stderr — fs error messages embed absolute paths that include the OS username.
+// Keeps errors loud and diagnostic while not printing PII.
+function redactHome(msg) {
+  const home = os.homedir();
+  return home ? String(msg).split(home).join('~') : String(msg);
+}
 
 // Period choices offered by the interactive backfill picker. `days === 0` means
 // "no cutoff" (full history). 90 days is the default (matches DEFAULT_SINCE).
@@ -131,7 +141,7 @@ function enumerate(agentSlug) {
         return [];
     }
   } catch (e) {
-    err(`  (backfill: could not enumerate ${agentSlug} sessions: ${e.message})`);
+    err(`  (backfill: could not enumerate ${agentSlug} sessions: ${redactHome(e.message)})`);
     return [];
   }
 }
@@ -271,58 +281,88 @@ async function uploadAll(perAgent, { concurrency = defaultConcurrency(), dryRun 
   const envelopes = [];
   const failures = []; // { agent, message } — surfaced as a summary by the caller
 
-  for (const entry of perAgent) {
-    const { agent, descriptors } = entry;
-    const total = descriptors.length;
-    const build = builderFor(agent);
-    let done = 0;
-    let sent = 0;
-    let failed = 0;
-    const tick = () => {
-      done += 1;
-      if (onProgress) onProgress({ agent, done, total });
-    };
+  // Keep-alive agents so the many concurrent POSTs reuse connections rather than
+  // re-handshaking TCP+TLS each time (Node 18's globalAgent has keepAlive off).
+  // Destroyed in the finally so their idle sockets don't delay CLI exit. Skipped
+  // for dry-run (no POSTs).
+  const agents = dryRun
+    ? null
+    : {
+        http: new http.Agent({ keepAlive: true, maxSockets: concurrency }),
+        https: new https.Agent({ keepAlive: true, maxSockets: concurrency }),
+      };
 
-    // PHASE 2 — PREPROCESS (unthrottled). Build every envelope. A build failure is
-    // counted + collected here and never reaches the transmit phase.
-    const ready = [];
-    for (const d of descriptors) {
-      try {
-        ready.push(build(syntheticHook(agent, d), { trigger: 'backfill', source: 'cli' }));
-      } catch (e) {
-        failed += 1;
-        failures.push({ agent, message: e.message });
-        tick(); // a skipped session is "done" for progress
-      }
+  try {
+    for (const entry of perAgent) {
+      summary.push(
+        await uploadProvider(entry, { concurrency, dryRun, onProgress, agents, envelopes, failures })
+      );
     }
-
-    if (dryRun) {
-      for (const envelope of ready) {
-        envelopes.push({ agent, envelope });
-        sent += 1;
-        tick();
-      }
-      summary.push({ agent, total, sent, failed });
-      continue;
+  } finally {
+    if (agents) {
+      agents.http.destroy();
+      agents.https.destroy();
     }
-
-    // PHASE 3 — TRANSMIT (rate-limited to `concurrency`).
-    await asyncPool(concurrency, ready, async (envelope) => {
-      try {
-        await collector.postEnvelope(envelope, agent);
-        sent += 1;
-      } catch (e) {
-        failed += 1;
-        failures.push({ agent, message: e.message });
-      } finally {
-        tick();
-      }
-    });
-
-    summary.push({ agent, total, sent, failed });
   }
 
   return { summary, envelopes, failures };
+}
+
+// Backfill one provider: PREPROCESS (build every envelope, unthrottled) then
+// TRANSMIT (POST at `concurrency`, or collect for dry-run). Pushes any build/POST
+// failures into `failures` and dry-run envelopes into `envelopes`. Returns this
+// provider's { agent, total, sent, failed } summary. onProgress ticks once per
+// session (build-skip or transmit) so counts always reach `total`.
+async function uploadProvider(entry, { concurrency, dryRun, onProgress, agents, envelopes, failures }) {
+  const { agent, descriptors } = entry;
+  const total = descriptors.length;
+  const build = builderFor(agent);
+  let done = 0;
+  let sent = 0;
+  let failed = 0;
+  const tick = () => {
+    done += 1;
+    if (onProgress) onProgress({ agent, done, total });
+  };
+
+  // PHASE 2 — PREPROCESS (unthrottled). A build failure is counted + collected
+  // here and never reaches the transmit phase. Holds all of this provider's built
+  // envelopes in memory (~2KB each) — fine at realistic session counts; a
+  // multi-year `--all` on a heavy user is the only case that could grow large.
+  const ready = [];
+  for (const d of descriptors) {
+    try {
+      ready.push(build(syntheticHook(agent, d), { trigger: 'backfill', source: 'cli' }));
+    } catch (e) {
+      failed += 1;
+      failures.push({ agent, message: e.message });
+      tick(); // a skipped session is "done" for progress
+    }
+  }
+
+  if (dryRun) {
+    for (const envelope of ready) {
+      envelopes.push({ agent, envelope });
+      sent += 1;
+      tick();
+    }
+    return { agent, total, sent, failed };
+  }
+
+  // PHASE 3 — TRANSMIT (rate-limited to `concurrency`).
+  await asyncPool(concurrency, ready, async (envelope) => {
+    try {
+      await collector.postEnvelope(envelope, agent, { agents });
+      sent += 1;
+    } catch (e) {
+      failed += 1;
+      failures.push({ agent, message: e.message });
+    } finally {
+      tick();
+    }
+  });
+
+  return { agent, total, sent, failed };
 }
 
 // ---------------------------------------------------------------------------
@@ -330,17 +370,12 @@ async function uploadAll(perAgent, { concurrency = defaultConcurrency(), dryRun 
 // ---------------------------------------------------------------------------
 
 function dateStr(ms) {
+  if (!ms) return '?'; // null/0 (a session with no usable timestamp) — don't print 1970
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function printScanSummary(result) {
-  for (const p of result.perAgent) {
-    if (p.count === 0) continue;
-    out(`  ${AGENT_LABELS[p.agent] || p.agent}: ${p.count} sessions (${dateStr(p.oldestMs)} → ${dateStr(p.newestMs)})`);
-  }
-}
-
-// Per-connector session counts as a single block, for the clack note box.
+// Per-connector session counts as a single block — used both for the clack note
+// box (interactive) and printed line-by-line for the scripted path.
 function scanSummaryText(result) {
   return result.perAgent
     .filter((p) => p.count > 0)
@@ -349,6 +384,11 @@ function scanSummaryText(result) {
         `${AGENT_LABELS[p.agent] || p.agent}:  ${p.count} sessions  (${dateStr(p.oldestMs)} → ${dateStr(p.newestMs)})`
     )
     .join('\n');
+}
+
+function printScanSummary(result) {
+  const s = scanSummaryText(result);
+  if (s) out(s);
 }
 
 // Friendly, one-line note about skipped sessions — shown AFTER the success line
@@ -381,15 +421,6 @@ function finalLine(summary) {
     : `Imported ${totalSent} of ${total} sessions across ${agentsList}`;
 }
 
-function promptLine(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (ans) => {
-      rl.close();
-      resolve(ans);
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------
 // interactive entry point — called by `connect` after hooks install
@@ -466,7 +497,7 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
       }
     }
   } catch (e) {
-    err(`  (backfill: skipped due to error: ${e.message})`);
+    err(`  (backfill: skipped due to error: ${redactHome(e.message)})`);
   }
 }
 
@@ -595,8 +626,11 @@ async function runBackfill(argv) {
   }
 
   if (!opts.yes) {
+    // Deliberately a plain Y/n line, not the polished ui.confirm flow: reaching
+    // here means a scripting flag (--since/--all) was passed, i.e. a script-
+    // adjacent invocation. The bare `attribut backfill` gets the polished flow.
     if (process.stdout.isTTY && process.stdin.isTTY) {
-      const answer = (await promptLine(`Backfill ${result.total} sessions to ATTRIBUT? [Y/n]: `))
+      const answer = (await ui.ask(`Backfill ${result.total} sessions to ATTRIBUT? [Y/n]: `))
         .trim()
         .toLowerCase();
       if (answer === 'n' || answer === 'no') {

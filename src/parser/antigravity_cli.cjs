@@ -408,14 +408,17 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
     const out = [];
     for (const childId of children) {
       const agentType = agyTokens.readAgentType(childId, names);
-      const usage = agyTokens.readUsageInputOutput(childId) || { input: 0, output: 0 };
+      // One combined gen_metadata read for both usage and model, instead of
+      // readUsageInputOutput()+readModel() each re-opening/re-scanning the DB.
+      const gen = agyTokens.readGenMetadata(childId);
+      const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0 };
       const { tool_uses, tool_use_count, started_at, ended_at, duration_ms } = childStats(
         brainTranscriptPath(childId)
       );
       out.push({
         agent_type: agentType ? cap(agentType, CAP_LABEL) : null,
         role: agentType && roleByName[agentType] ? roleByName[agentType] : null,
-        model: cap(agyTokens.readModel(childId), CAP_LABEL),
+        model: cap(gen.model, CAP_LABEL),
         status: 'completed',
         tool_uses,
         tool_use_count,

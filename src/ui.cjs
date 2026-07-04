@@ -273,4 +273,5 @@ module.exports = {
   progressBar,
   selectAgents,
   interactive,
+  ask,
 };

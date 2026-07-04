@@ -504,10 +504,16 @@ function readParentId(conversationId) {
 // Semantic input/output token totals for a conversation (the RE'd 1.4.2/1.4.3
 // paths). Used for nested subagents, whose tokens must be labelled client-side
 // (the parent's own tokens stay raw → server-mapped). { input, output } or null.
+// Project a usage_raw object to { input, output }. Pure — keeps the varint-path
+// knowledge (1.4.2 / 1.4.3) in one place so callers that already hold usage_raw
+// (from a combined readGenMetadata) don't re-read the DB just to map it.
+function usageInputOutput(usageRaw) {
+  if (!usageRaw) return null;
+  return { input: usageRaw['1.4.2'] || 0, output: usageRaw['1.4.3'] || 0 };
+}
+
 function readUsageInputOutput(conversationId) {
-  const u = readUsageRaw(conversationId);
-  if (!u) return null;
-  return { input: u['1.4.2'] || 0, output: u['1.4.3'] || 0 };
+  return usageInputOutput(readUsageRaw(conversationId));
 }
 
 // Find the child conversationIds whose parent is `parentId` (reverse scan of the
@@ -616,10 +622,12 @@ module.exports = {
   collectVarints,
   collectStringsAtPath,
   looksLikeTitle,
+  readGenMetadata,
   readUsageRaw,
   readModel,
   readTitle,
   readParentId,
+  usageInputOutput,
   readUsageInputOutput,
   findChildren,
   readAgentType,
