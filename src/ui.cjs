@@ -9,9 +9,11 @@ const readline = require('readline');
 //      dynamic import() — never a top-level require — so it stays off the module
 //      graph of the collector HOT PATH (the hook invocations). Only `connect`,
 //      an explicit interactive user action, ever pulls clack in.
-//   2. Everything degrades. With no TTY (CI, pipes) or if the import fails, every
-//      helper falls back to plain stdout, and selectAgents() throws so the caller
-//      can use its own numbered-prompt fallback. Polish is never load-bearing.
+//   2. Everything degrades. If the clack import fails, every helper falls back to
+//      plain stdout / readline; clack's own renderers already no-op their
+//      animation when stdout isn't a TTY (CI, pipes), so output stays clean there
+//      too. selectAgents() throws on import failure so the caller can use its own
+//      numbered-prompt fallback. Polish is never load-bearing.
 
 // ── ASCII wordmark ──────────────────────────────────────────────────────────
 // Two widths so the banner never wraps: ANSI Shadow (needs ~62 cols) and a
@@ -77,7 +79,6 @@ function showBanner() {
 
 // clack intro/outro framing — plain fallback when clack is unavailable.
 async function intro(message) {
-  if (!interactive()) return;
   try {
     const p = await loadClack();
     p.intro(message);
@@ -153,13 +154,15 @@ async function spinner() {
     return {
       start: (m) => s.start(m),
       message: (m) => s.message(m),
-      stop: (m, code) => s.stop(m, code),
+      stop: (m) => s.stop(m), // clack's stop() always renders the success symbol
+      error: (m) => s.error(m), // red ✗ for a failure stop
     };
   } catch {
     return {
       start: (m) => m && write(m),
       message: (m) => m && write(m),
       stop: (m) => m && write(m),
+      error: (m) => m && process.stderr.write(`${m}\n`),
     };
   }
 }
@@ -270,5 +273,4 @@ module.exports = {
   progressBar,
   selectAgents,
   interactive,
-  _internal: { BANNER_WIDE, BANNER_NARROW },
 };

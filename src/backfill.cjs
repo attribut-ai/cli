@@ -558,7 +558,7 @@ async function runBackfill(argv) {
   // which tools and still gets the polished flow. Tests run non-TTY, so they never
   // take this branch.
   const scripted = opts.all || opts.sinceExplicit || opts.yes || opts.dryRun;
-  if (!scripted && process.stdout.isTTY && process.stdin.isTTY) {
+  if (!scripted && ui.interactive()) {
     await runBackfillInteractive({ connected: agents.map((a) => ({ agent: a })) });
     return 0;
   }

@@ -375,7 +375,7 @@ async function runConnect(argv) {
     try {
       poll = await postJson(`${appBase}/api/device/poll`, { deviceCode });
     } catch (e) {
-      spin.stop('Approval check failed', 2);
+      spin.error('Approval check failed');
       err(`Poll failed: ${e.message}`);
       return 1;
     }
@@ -385,14 +385,14 @@ async function runConnect(argv) {
       break;
     }
     if (status === 'expired') {
-      spin.stop('Request expired', 2);
+      spin.error('Request expired');
       err('The request expired before it was approved. Re-run `attribut connect`.');
       return 1;
     }
     // 'pending' (or anything else) → keep waiting.
   }
   if (!configs) {
-    spin.stop('Timed out', 2);
+    spin.error('Timed out');
     err('Timed out waiting for approval. Re-run `attribut connect`.');
     return 1;
   }
