@@ -27,10 +27,14 @@ jobs:
         with:
           node-version: 24 # npm ≥11.5 required for trusted publishing
           registry-url: https://registry.npmjs.org
+          cache: npm
       - name: Verify tag matches package.json version
         run: |
           PKG_V="v$(node -p "require('./package.json').version")"
           [ "$PKG_V" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != package.json $PKG_V"; exit 1; }
+      # Install deps before the test gate — the suite requires ajv (envelope
+      # validation) and @clack/prompts; without this the collector fails to load.
+      - run: npm ci
       # Serialized: the node:test parallel-file runner has an IPC flake
       # ("Unable to deserialize cloned data") on some Node versions. The suite is
       # sub-second, so concurrency buys nothing and serialization is deterministic.
