@@ -28,9 +28,28 @@ function readState() {
   }
 }
 
+// Atomically write `data` to `file` with `mode`: sibling temp (same filesystem →
+// atomic rename), chmod to defeat the umask, then rename over the live file. A
+// crash mid-write can only leave the temp behind, never a truncated real file.
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
 function writeState(state) {
   fs.mkdirSync(configDir(), { recursive: true });
-  fs.writeFileSync(statePath(), JSON.stringify(state) + '\n', { encoding: 'utf8', mode: 0o600 });
+  writeFileAtomic(statePath(), JSON.stringify(state) + '\n', 0o600);
 }
 
 // Record "a hook fired just now". Called on every collector invocation —

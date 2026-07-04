@@ -43,10 +43,29 @@ function readCached() {
   }
 }
 
+// Atomically write `data` to `file` with `mode`: sibling temp (same filesystem →
+// atomic rename), chmod to defeat the umask, then rename over the live file. A
+// crash mid-write can only leave the temp behind, never a truncated real file.
+function writeFileAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* temp may not exist — fine */
+    }
+    throw err;
+  }
+}
+
 function persist(id) {
   try {
     fs.mkdirSync(configDir(), { recursive: true });
-    fs.writeFileSync(machineIdPath(), id + '\n', { encoding: 'utf8', mode: 0o600 });
+    writeFileAtomic(machineIdPath(), id + '\n', 0o600);
   } catch (err) {
     process.stderr.write(`[attribut] could not persist machine_id to ${machineIdPath()}: ${err.message}\n`);
   }
