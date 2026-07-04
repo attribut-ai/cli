@@ -189,6 +189,22 @@ found and how far back they go, then lets you pick **last 90 days** (default),
 offer. Run `attribut backfill` yourself anytime to import a wider/narrower window
 later.
 
+**How far back `--all` reaches depends on the tool, not on attribut.** Backfill
+can only send what each tool still keeps on disk, and the tools differ:
+
+- **Claude Code** deletes transcripts older than its `cleanupPeriodDays` setting
+  (**default 30 days**). So a fresh `--all` typically reaches back ~30 days even
+  if you've used it for months. To keep more, raise it in `~/.claude/settings.json`
+  (e.g. `"cleanupPeriodDays": 365`) — this only affects sessions going *forward*;
+  already-deleted transcripts are gone.
+- **Cursor** keeps a long history in its local `state.vscdb` (often many months).
+- **Codex** and **Antigravity** retain their on-disk session records until you
+  remove them; how far back `--all` reaches tracks how long you've used the tool.
+
+Because live capture posts each new session at session-end regardless of these
+policies, backfill only ever matters for the window *before* you connected — and
+even then only as far back as the tool still has the data.
+
 Re-sending is safe: the server reconciles by `sessionId` (*latest non-partial
 wins*), so a session already captured live — or backfilled twice — just overwrites
 in place. It never double-counts. `--dry-run` prints the envelopes it *would* send
