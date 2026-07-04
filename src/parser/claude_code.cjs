@@ -390,8 +390,8 @@ function subagentNameFromFile(fileName) {
 // parseClaudeCodeTranscript (with file-subagent discovery DISABLED to bound recursion
 // to one level) and its totals reshaped into the subagent struct. Numbers + the
 // filename-derived role label only — never message/prompt/diff content. Returns []
-// on any failure; never throws (mirrors antigravity_cli.buildSubagents).
-function subagentsFromFiles(transcriptPath, sessionId) {
+// on any failure; never throws (mirrors antigravity_cli.buildAntigravitySubagents).
+function buildClaudeSubagents(transcriptPath, sessionId) {
   try {
     if (!sessionId) return [];
     const abs = expandHome(transcriptPath);
@@ -632,7 +632,7 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
   const fileSubs =
     extra.withFileSubagents === false
       ? []
-      : subagentsFromFiles(transcriptPath, extra.sessionId || sessionId);
+      : buildClaudeSubagents(transcriptPath, extra.sessionId || sessionId);
   const subagents = fileSubs.length ? fileSubs : inlineSubagents;
 
   // Fold the chosen plane's tokens into the session totals. Additive (those turns
@@ -705,6 +705,7 @@ function parseClaudeCodeTranscript(transcriptPath, extra = {}) {
 }
 
 module.exports = {
+  cap,
   SHA_RE,
   extractShasFromToolResult,
   branchFromBracketLine,
@@ -716,6 +717,6 @@ module.exports = {
   newStructAccumulator,
   expandHome,
   subagentNameFromFile,
-  subagentsFromFiles,
+  buildClaudeSubagents,
   parseClaudeCodeTranscript,
 };

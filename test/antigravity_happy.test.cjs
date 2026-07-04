@@ -162,7 +162,7 @@ test('extractSubagentDecls pulls names + roles, never the prompt', () => {
   }
 });
 
-test('buildSubagents nests children with type/role/model/tokens', { skip: !nodeSqlite }, () => {
+test('buildAntigravitySubagents nests children with type/role/model/tokens', { skip: !nodeSqlite }, () => {
   const os = require('os');
   const fs = require('fs');
   const { buildSyntheticDb } = require('./fixtures/agy/build_db.cjs');
@@ -215,7 +215,7 @@ test('buildSubagents nests children with type/role/model/tokens', { skip: !nodeS
         JSON.stringify({ tool_calls: [{ name: 'invoke_subagent', args: { Subagents: [{ TypeName: 'security-reviewer', Role: 'Security Sentinel' }, { TypeName: 'performance-reviewer', Role: 'Performance Oracle' }] } }] }),
       ].join('\n')
     );
-    const subs = agy.buildSubagents(ptx, PA).sort((a, b) => a.agent_type.localeCompare(b.agent_type));
+    const subs = agy.buildAntigravitySubagents(ptx, PA).sort((a, b) => a.agent_type.localeCompare(b.agent_type));
     assert.strictEqual(subs.length, 2);
     const sec = subs.find((s) => s.agent_type === 'security-reviewer');
     assert.strictEqual(sec.role, 'Security Sentinel');

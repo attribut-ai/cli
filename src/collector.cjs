@@ -217,23 +217,23 @@ function cloudContext() {
 // cursor and skip the parse+POST entirely. SessionEnd/Stop always full-parse, so
 // anything skipped here is still reconciled at session end.
 
-function cursorPath(sessionId) {
+function byteCursorPath(sessionId) {
   const safe = String(sessionId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
   return path.join(configDir(), 'cursor', safe);
 }
 
-function readCursor(sessionId) {
+function readByteCursor(sessionId) {
   try {
-    const n = parseInt(fs.readFileSync(cursorPath(sessionId), 'utf8').trim(), 10);
+    const n = parseInt(fs.readFileSync(byteCursorPath(sessionId), 'utf8').trim(), 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch {
     return 0;
   }
 }
 
-function writeCursor(sessionId, offset) {
+function writeByteCursor(sessionId, offset) {
   try {
-    const file = cursorPath(sessionId);
+    const file = byteCursorPath(sessionId);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, String(offset) + '\n', { encoding: 'utf8', mode: 0o600 });
   } catch {
@@ -242,9 +242,9 @@ function writeCursor(sessionId, offset) {
   }
 }
 
-function clearCursor(sessionId) {
+function clearByteCursor(sessionId) {
   try {
-    fs.unlinkSync(cursorPath(sessionId));
+    fs.unlinkSync(byteCursorPath(sessionId));
   } catch {
     /* absent — fine */
   }
@@ -260,11 +260,11 @@ function posttooluseCanSkip(hook) {
   try {
     const abs = parser.expandHome(tp);
     const size = fs.statSync(abs).size;
-    let offset = readCursor(hook.session_id);
+    let offset = readByteCursor(hook.session_id);
     if (offset > size) offset = 0; // transcript shrank/rotated → re-read from start
     if (size <= offset) {
       // Nothing new appended since last fire — nothing could have changed.
-      writeCursor(hook.session_id, size);
+      writeByteCursor(hook.session_id, size);
       return true;
     }
     const len = size - offset;
@@ -274,7 +274,7 @@ function posttooluseCanSkip(hook) {
     // statSync and readSync, `n < len` and the buffer tail is uninitialized memory.
     const n = fs.readSync(fd, buf, 0, len, offset);
     const tail = buf.subarray(0, n).toString('utf8');
-    writeCursor(hook.session_id, size);
+    writeByteCursor(hook.session_id, size);
     // Same trigger the parser uses: a `[branch sha]` commit line in the new bytes.
     parser.SHA_RE.lastIndex = 0;
     return !parser.SHA_RE.test(tail);
@@ -520,7 +520,7 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     // Nest this session's subagents (agy runs each as a separate conversation;
     // their standalone posts are suppressed in main()). Folds in their tokens
     // server-side. tp is the parent transcript.
-    payload.antigravity.subagents = agyParser.buildSubagents(tp, conversationId);
+    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId);
   } else {
     payload.antigravity.usage_raw = null;
   }
@@ -905,7 +905,7 @@ async function main() {
     // which the hook carries as conversation_id, not session_id.
     if (provider !== 'antigravity' && (trigger === 'sessionend' || trigger === 'stop')) {
       const sessionKey = provider === 'cursor' ? envelope.payload.sessionId : hook.session_id;
-      clearCursor(sessionKey);
+      clearByteCursor(sessionKey);
       clearCapturedShas(sessionKey);
     }
   } catch (err) {
@@ -950,9 +950,9 @@ module.exports = {
   buildCodexEnvelopeFromHook,
   buildCursorEnvelopeFromHook,
   postEnvelope,
-  cursorPath,
+  byteCursorPath,
   posttooluseCanSkip,
-  clearCursor,
+  clearByteCursor,
   isGitCommitCommand,
   commitDirFromCommand,
   revParseHead,

@@ -113,7 +113,7 @@ function writeConfig(text, p = codexConfigPath()) {
  * Full install apply: read → backup → upsert each event's array-of-tables →
  * write. `specsByEvent` maps "hooks.PostToolUse"/"hooks.Stop" → [spec]. `isOurs`
  * identifies our prior entries to replace (ownership by collector path in the
- * command text). Returns { backupPath, configPath }.
+ * command text). Returns { backupPath, settingsPath }.
  */
 function applyCodexHooks(specsByEvent, isOurs, p = codexConfigPath()) {
   const existing = readConfig(p);
@@ -124,12 +124,12 @@ function applyCodexHooks(specsByEvent, isOurs, p = codexConfigPath()) {
     next = upsertArrayTables(next, event, specs, isOurs);
   }
   writeConfig(next, p);
-  return { backupPath, configPath: p };
+  return { backupPath, settingsPath: p };
 }
 
 /**
  * Full uninstall apply: read → (backup + write only if our entries were present).
- * Returns { backupPath, configPath, removed }. A no-op when nothing matched.
+ * Returns { backupPath, settingsPath, removed }. A no-op when nothing matched.
  */
 function applyCodexUninstall(isOurs, p = codexConfigPath()) {
   const existing = readConfig(p);
@@ -141,11 +141,11 @@ function applyCodexUninstall(isOurs, p = codexConfigPath()) {
     removed += res.removed;
   }
   if (removed === 0) {
-    return { backupPath: null, configPath: p, removed: 0 };
+    return { backupPath: null, settingsPath: p, removed: 0 };
   }
   const backupPath = backupConfig(p);
   writeConfig(next, p);
-  return { backupPath, configPath: p, removed };
+  return { backupPath, settingsPath: p, removed };
 }
 
 module.exports = {
