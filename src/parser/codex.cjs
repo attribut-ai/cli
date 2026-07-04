@@ -43,6 +43,7 @@ const os = require('os');
 
 // Shared structural + SHA helpers live in the Claude parser (the canonical home).
 const {
+  cap,
   SHA_RE,
   branchFromBracketLine,
   classify,
@@ -55,10 +56,6 @@ const {
 const CAP_PATH = 256; // branch
 const CAP_REPO = 2000; // repo — generous, absorbs very long cwd/folder paths
 const CAP_LABEL = 128; // model / effort / version / agent_type / role / status
-
-function cap(s, n) {
-  return typeof s === 'string' && s.length > n ? s.slice(0, n) : s;
-}
 
 // Scan a tool-output string for git-commit `[branch sha]` brackets. Returns
 // [{ sha, line }]. We scan ONLY the `output` field of a tool-result payload —

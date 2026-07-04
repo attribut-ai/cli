@@ -268,9 +268,9 @@ function readGenMetadata(conversationId) {
       }
       // model: count each model-id-shaped token; most-frequent wins below.
       const text = b.toString('latin1');
-      MODEL_ID_RE.lastIndex = 0;
+      MODEL_ID_SCAN_RE.lastIndex = 0;
       let m;
-      while ((m = MODEL_ID_RE.exec(text)) !== null) {
+      while ((m = MODEL_ID_SCAN_RE.exec(text)) !== null) {
         const id = m[0].toLowerCase();
         modelCounts.set(id, (modelCounts.get(id) || 0) + 1);
       }
@@ -311,7 +311,7 @@ function readUsageRaw(conversationId) {
 // commit-SHA extraction — nothing but a model id can ever be emitted. The id is
 // the internal one Antigravity stamps per generation (e.g. `gemini-3-flash-a`),
 // which is exactly the key the server's pricing table uses.
-const MODEL_ID_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
+const MODEL_ID_SCAN_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
 
 // Read the resolved model id for a conversation, or null. Delegates to the
 // combined single pass, which tallies model-id-shaped tokens across the small
