@@ -119,7 +119,13 @@ function triggerFor(hookEventName, explicit) {
 
 // gzip + POST the envelope. Resolves on 2xx, rejects otherwise. The caller is
 // responsible for turning a rejection into a quiet (exit-0) failure.
-function postEnvelope(envelope, agent) {
+// `agent` is the tool slug (for token lookup). `opts.agents` is an optional
+// { http, https } pair of keep-alive http(s).Agent instances — the backfill path
+// passes them so its many concurrent POSTs reuse TCP+TLS connections instead of
+// handshaking anew each time (Node's globalAgent has keepAlive off on Node 18).
+// The single-shot hook hot path passes nothing and uses the default agent, so no
+// socket lingers to delay process exit.
+function postEnvelope(envelope, agent, opts = {}) {
   return new Promise((resolve, reject) => {
     let url;
     try {
@@ -171,6 +177,9 @@ function postEnvelope(envelope, agent) {
             Authorization: `Bearer ${tok}`,
           },
           timeout: 10000,
+          // Reuse a keep-alive connection when the caller supplied one (backfill);
+          // undefined falls back to the default globalAgent (hook hot path).
+          agent: opts.agents && opts.agents[url.protocol === 'http:' ? 'http' : 'https'],
         },
         (res) => {
           let resp = '';
@@ -512,8 +521,12 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
   // any failure — token/model capture must never break the rest). The server maps
   // usage_raw → input/output and prices by model.
   if (conversationId) {
-    payload.antigravity.usage_raw = agyTokens.readUsageRaw(conversationId);
-    if (!payload.model) payload.model = agyTokens.readModel(conversationId);
+    // One combined read of gen_metadata (usage_raw + model in a single DB
+    // open/parse) instead of readUsageRaw()+readModel(), which each re-opened and
+    // re-scanned the same rows. Runs on every PostToolUse fire, so it matters.
+    const gen = agyTokens.readGenMetadata(conversationId);
+    payload.antigravity.usage_raw = gen.usageRaw;
+    if (!payload.model) payload.model = gen.model;
     // The generated session title (agy's content-derived summary; readTitle caps
     // to the schema's 200) — same allowlisted exception as Claude's ai-title.
     if (!payload.title) payload.title = agyTokens.readTitle(conversationId);

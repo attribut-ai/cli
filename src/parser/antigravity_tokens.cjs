@@ -182,11 +182,31 @@ function collectVarints(buf, prefix, out, depth) {
 // Mimics Node's `DatabaseSync` interface so that we support both node:sqlite and better-sqlite3 seamlessly.
 // Memoized: driver availability can't change mid-process, so the `require` resolution
 // (including a permanent null when no driver exists) is cached after the first call.
+// Suppress node:sqlite's one-time ExperimentalWarning ONLY for the duration of a
+// synchronous callback, restoring process.emitWarning immediately afterward. A
+// PERSISTENT override of process.emitWarning breaks tooling that depends on it
+// (notably the node:test runner's IPC), so the window must be as narrow as the
+// require itself. Returns whatever `fn` returns.
+function withoutSqliteExperimentalWarning(fn) {
+  const orig = process.emitWarning;
+  process.emitWarning = function (warning, ...rest) {
+    const type = typeof rest[0] === 'string' ? rest[0] : rest[0] && rest[0].type;
+    const text = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+    if (String(type) === 'ExperimentalWarning' && /sqlite/i.test(text)) return undefined;
+    return orig.call(process, warning, ...rest);
+  };
+  try {
+    return fn();
+  } finally {
+    process.emitWarning = orig;
+  }
+}
+
 let _databaseClass; // undefined = not yet resolved; null = resolved-unavailable
 function getDatabaseClass() {
   if (_databaseClass !== undefined) return _databaseClass;
   try {
-    const { DatabaseSync } = require('node:sqlite');
+    const { DatabaseSync } = withoutSqliteExperimentalWarning(() => require('node:sqlite'));
     if (DatabaseSync) {
       _databaseClass = DatabaseSync;
       return _databaseClass;
@@ -484,10 +504,16 @@ function readParentId(conversationId) {
 // Semantic input/output token totals for a conversation (the RE'd 1.4.2/1.4.3
 // paths). Used for nested subagents, whose tokens must be labelled client-side
 // (the parent's own tokens stay raw → server-mapped). { input, output } or null.
+// Project a usage_raw object to { input, output }. Pure — keeps the varint-path
+// knowledge (1.4.2 / 1.4.3) in one place so callers that already hold usage_raw
+// (from a combined readGenMetadata) don't re-read the DB just to map it.
+function usageInputOutput(usageRaw) {
+  if (!usageRaw) return null;
+  return { input: usageRaw['1.4.2'] || 0, output: usageRaw['1.4.3'] || 0 };
+}
+
 function readUsageInputOutput(conversationId) {
-  const u = readUsageRaw(conversationId);
-  if (!u) return null;
-  return { input: u['1.4.2'] || 0, output: u['1.4.3'] || 0 };
+  return usageInputOutput(readUsageRaw(conversationId));
 }
 
 // Find the child conversationIds whose parent is `parentId` (reverse scan of the
@@ -596,10 +622,12 @@ module.exports = {
   collectVarints,
   collectStringsAtPath,
   looksLikeTitle,
+  readGenMetadata,
   readUsageRaw,
   readModel,
   readTitle,
   readParentId,
+  usageInputOutput,
   readUsageInputOutput,
   findChildren,
   readAgentType,
