@@ -35,9 +35,9 @@ jobs:
       # Install deps before the test gate — the suite requires ajv (envelope
       # validation) and @clack/prompts; without this the collector fails to load.
       - run: npm ci
-      # `npm test` runs each file in its own process with --test-isolation=none,
-      # which sidesteps the node:test multi-file IPC flake ("Unable to deserialize
-      # cloned data") that otherwise fails this gate intermittently.
+      # `npm test` runs each file directly in its own process (no `node --test`
+      # multi-file orchestrator), sidestepping the node:test IPC flake ("Unable to
+      # deserialize cloned data") that otherwise fails this gate intermittently.
       - run: npm test
       - name: Stamp build SHA
         run: |

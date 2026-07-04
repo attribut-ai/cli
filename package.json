@@ -12,7 +12,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "for f in test/*.test.cjs; do node --test --test-isolation=none \"$f\" || exit 1; done"
+    "test": "for f in test/*.test.cjs; do node \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=22.5"
