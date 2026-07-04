@@ -87,7 +87,7 @@ Two different structures, and you usually want both:
   collection shows "no collection" and is not visible to customers.
 - **Collections** (and **sections**, which are just collections with a parent)
   are the *public* Help Center structure. An article is only visible on
-  `docs.attribut.ai` when it's in a collection.
+  `help.attribut.ai` when it's in a collection.
 
 An article can be in both at once. `upload_to_intercom.mjs` sets the folder;
 `assign_collection.mjs` puts the same articles into a public collection/section:
