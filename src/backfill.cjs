@@ -37,6 +37,16 @@ const readline = require('readline');
 const collector = require('./collector.cjs');
 const { readToken } = require('./token.cjs');
 const { allTranscripts } = require('./audit.cjs');
+const ui = require('./ui.cjs');
+
+// Period choices offered by the interactive backfill picker. `days === 0` means
+// "no cutoff" (full history). 90 days is the default (matches DEFAULT_SINCE).
+const PERIOD_OPTIONS = [
+  { value: 30, label: 'Last 30 days' },
+  { value: 90, label: 'Last 90 days', hint: 'default' },
+  { value: 365, label: 'Last year' },
+  { value: 0, label: 'All history' },
+];
 
 const AGENT_SLUGS = ['claude_code', 'codex', 'agy', 'cursor'];
 const AGENT_LABELS = {
@@ -233,45 +243,86 @@ function syntheticHook(agentSlug, d) {
 // onProgress({ agent, done, total }) after each session (success or failure).
 // Returns { summary: [{ agent, total, sent, failed }], envelopes }. A single
 // session's build/post failure is logged and counted as failed — never fatal.
-async function uploadAll(perAgent, { concurrency = 8, dryRun = false, onProgress } = {}) {
+// Concurrent HTTP POSTs per agent. Default concurrency is 16 (these are small
+// gzipped metadata POSTs); override with ATTRIBUT_BACKFILL_CONCURRENCY. There is
+// no server-side retry/backoff yet, so we don't push this arbitrarily high.
+function defaultConcurrency() {
+  const n = Number.parseInt(process.env.ATTRIBUT_BACKFILL_CONCURRENCY, 10);
+  return Number.isInteger(n) && n > 0 ? Math.min(64, n) : 16;
+}
+
+// Backfill each provider in three phases (enumerate → preprocess → transmit),
+// one provider fully before the next:
+//
+//   • PREPROCESS builds every envelope up front — CPU/IO-bound (transcript reads,
+//     SQLite, JSON parsing). It runs UNTHROTTLED: it must not be gated by the
+//     transmit concurrency, since a fast local machine can prepare far more than
+//     16 at a time.
+//   • TRANSMIT POSTs the built envelopes at `concurrency` (default 16) — the
+//     network-bound, rate-limited phase.
+//
+// Separating them keeps a heavy preprocess (e.g. a big Cursor DB) from starving
+// the network pipe and vice-versa. onProgress fires once per session (build-skip
+// or transmit) with the provider's cumulative done/total. Failures are counted +
+// collected (never re-thrown, never printed inline — the caller summarizes them
+// after the bar). dryRun collects built envelopes instead of POSTing.
+async function uploadAll(perAgent, { concurrency = defaultConcurrency(), dryRun = false, onProgress } = {}) {
   const summary = [];
   const envelopes = [];
+  const failures = []; // { agent, message } — surfaced as a summary by the caller
 
   for (const entry of perAgent) {
     const { agent, descriptors } = entry;
     const total = descriptors.length;
+    const build = builderFor(agent);
     let done = 0;
     let sent = 0;
     let failed = 0;
-    const build = builderFor(agent);
-
-    const worker = async (d) => {
-      try {
-        const hook = syntheticHook(agent, d);
-        const envelope = build(hook, { trigger: 'backfill', source: 'cli' });
-        if (dryRun) {
-          envelopes.push({ agent, envelope });
-        } else {
-          await collector.postEnvelope(envelope, agent);
-        }
-        sent++;
-      } catch (e) {
-        // Self-accounting: count + log the failure here. asyncPool's result array
-        // is intentionally unused by uploadAll, so we do NOT re-throw — a single
-        // session's failure must never abort the batch.
-        failed++;
-        err(`  (backfill: ${agent} session failed: ${e.message})`);
-      } finally {
-        done++;
-        if (onProgress) onProgress({ agent, done, total });
-      }
+    const tick = () => {
+      done += 1;
+      if (onProgress) onProgress({ agent, done, total });
     };
 
-    await asyncPool(concurrency, descriptors, worker);
+    // PHASE 2 — PREPROCESS (unthrottled). Build every envelope. A build failure is
+    // counted + collected here and never reaches the transmit phase.
+    const ready = [];
+    for (const d of descriptors) {
+      try {
+        ready.push(build(syntheticHook(agent, d), { trigger: 'backfill', source: 'cli' }));
+      } catch (e) {
+        failed += 1;
+        failures.push({ agent, message: e.message });
+        tick(); // a skipped session is "done" for progress
+      }
+    }
+
+    if (dryRun) {
+      for (const envelope of ready) {
+        envelopes.push({ agent, envelope });
+        sent += 1;
+        tick();
+      }
+      summary.push({ agent, total, sent, failed });
+      continue;
+    }
+
+    // PHASE 3 — TRANSMIT (rate-limited to `concurrency`).
+    await asyncPool(concurrency, ready, async (envelope) => {
+      try {
+        await collector.postEnvelope(envelope, agent);
+        sent += 1;
+      } catch (e) {
+        failed += 1;
+        failures.push({ agent, message: e.message });
+      } finally {
+        tick();
+      }
+    });
+
     summary.push({ agent, total, sent, failed });
   }
 
-  return { summary, envelopes };
+  return { summary, envelopes, failures };
 }
 
 // ---------------------------------------------------------------------------
@@ -289,23 +340,45 @@ function printScanSummary(result) {
   }
 }
 
-function progressWriter() {
-  return ({ agent, done, total }) => {
-    if (!process.stdout.isTTY) return;
-    const pct = total ? Math.round((done / total) * 100) : 100;
-    process.stdout.write(`\r  Backfilling ${AGENT_LABELS[agent] || agent}… ${done}/${total} (${pct}%)`);
-    if (done === total) process.stdout.write('\n');
-  };
+// Per-connector session counts as a single block, for the clack note box.
+function scanSummaryText(result) {
+  return result.perAgent
+    .filter((p) => p.count > 0)
+    .map(
+      (p) =>
+        `${AGENT_LABELS[p.agent] || p.agent}:  ${p.count} sessions  (${dateStr(p.oldestMs)} → ${dateStr(p.newestMs)})`
+    )
+    .join('\n');
 }
 
+// Friendly, one-line note about skipped sessions — shown AFTER the success line
+// so a couple of skips never read as "the whole thing failed". Categorized by
+// cause; no raw errno or filesystem paths. Failures stay observable (count +
+// plain-language reason) without the mess.
+function failureSummary(failures) {
+  if (!failures || failures.length === 0) return null;
+  const n = failures.length;
+  const missing = failures.filter((f) => /ENOENT|no such file/i.test(f.message || '')).length;
+  const reason =
+    missing === n
+      ? `${n === 1 ? 'its local file was' : 'their local files were'} no longer on disk`
+      : 'they could not be read locally';
+  const these = n === 1 ? 'session was' : 'sessions were';
+  return `${n} ${these} skipped because ${reason}. This is harmless — everything else imported, and you can re-run anytime to retry.`;
+}
+
+// Positive, no-scare summary of the run. The count of skipped sessions (if any)
+// is conveyed separately by failureSummary(), so this line never says "failed".
 function finalLine(summary) {
   const totalSent = summary.reduce((n, s) => n + s.sent, 0);
-  const totalFailed = summary.reduce((n, s) => n + s.failed, 0);
+  const total = summary.reduce((n, s) => n + s.total, 0);
   const agentsList = summary
     .filter((s) => s.total > 0)
     .map((s) => AGENT_LABELS[s.agent] || s.agent)
     .join(', ');
-  return `✓ Backfilled ${totalSent} sessions (${totalFailed} failed) across ${agentsList}`;
+  return totalSent === total
+    ? `Imported all ${totalSent} sessions across ${agentsList}`
+    : `Imported ${totalSent} of ${total} sessions across ${agentsList}`;
 }
 
 function promptLine(question) {
@@ -339,30 +412,53 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
     const prevIngestBase = process.env.INGEST_BASE;
     if (ingestBase) process.env.INGEST_BASE = ingestBase;
     try {
-      let result = scan(agentSlugs, { sinceMs: parseSince('90d') });
-      if (result.total === 0) {
-        out('No prior sessions found to backfill.');
-        return;
+      // 1) Opt in (default yes). Reassure first: backfill is safe to run — and
+      // re-run — because the server reconciles by session ID.
+      await ui.note(
+        'Re-sends your prior local sessions through the same path as live capture.\n' +
+          'Safe to run — and re-run — anytime: ATTRIBUT deduplicates by session ID on\n' +
+          'the server, so nothing is ever double-counted.',
+        'Backfill'
+      );
+      const go = await ui.confirm('Backfill your prior local sessions to ATTRIBUT?', true);
+      if (!go) return; // false (declined) or null (cancelled) → skip silently
+
+      // 2) Choose the look-back window (default 90 days).
+      const days = await ui.select('How far back should we go?', PERIOD_OPTIONS, 90);
+      if (days === null) return; // cancelled
+      const sinceMs = days === 0 ? null : parseSince(`${days}d`);
+
+      // 3) Gather the docs and show the tally per connector. Scan one connector
+      // at a time, updating the spinner message and yielding between each, so the
+      // (synchronous, file/DB-bound) scan can't freeze the UI — the user sees
+      // "Scanning Cursor…" etc. rather than a stalled spinner.
+      const spin = await ui.spinner();
+      spin.start('Scanning local sessions…');
+      const result = { perAgent: [], total: 0 };
+      for (const agent of agentSlugs) {
+        spin.message(`Scanning ${AGENT_LABELS[agent] || agent}…`);
+        await new Promise((r) => setImmediate(r)); // let the frame paint first
+        const one = scan([agent], { sinceMs });
+        result.perAgent.push(...one.perAgent);
+        result.total += one.total;
       }
-      printScanSummary(result);
+      spin.stop(result.total ? `Found ${result.total} sessions` : 'No prior sessions found');
+      if (result.total === 0) return;
+      await ui.note(scanSummaryText(result), 'Sessions to backfill');
 
-      const answer = (
-        await promptLine('Backfill these to ATTRIBUT? [Y = last 90 days / a = all history / n = skip]: ')
-      )
-        .trim()
-        .toLowerCase();
-
-      if (answer === 'n') return;
-      if (answer === 'a') {
-        result = scan(agentSlugs, { sinceMs: null });
-        if (result.total === 0) {
-          out('No prior sessions found to backfill.');
-          return;
-        }
-      }
-
-      const { summary } = await uploadAll(result.perAgent, { onProgress: progressWriter() });
-      out(finalLine(summary));
+      // 4) Upload behind a single progress bar spanning every connector's docs.
+      const bar = await ui.progressBar({ max: result.total });
+      bar.start('Backfilling…');
+      const { summary, failures } = await uploadAll(result.perAgent, {
+        // Label shows the CURRENT connector's own progress (agentDone/agentTotal);
+        // the bar itself fills over the global total. Advancing by 1 per session.
+        onProgress: ({ agent, done: agentDone, total: agentTotal }) => {
+          bar.advance(1, `${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
+        },
+      });
+      bar.stop(finalLine(summary));
+      const skipped = failureSummary(failures);
+      if (skipped) await ui.log.info(skipped);
     } finally {
       if (ingestBase) {
         if (prevIngestBase === undefined) delete process.env.INGEST_BASE;
@@ -409,13 +505,13 @@ function splitList(s) {
 }
 
 function parseBackfillArgs(argv) {
-  const r = { agents: null, since: DEFAULT_SINCE, all: false, yes: false, dryRun: false, help: false };
+  const r = { agents: null, since: DEFAULT_SINCE, sinceExplicit: false, all: false, yes: false, dryRun: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--agents') r.agents = splitList(argv[++i]);
     else if (a.startsWith('--agents=')) r.agents = splitList(a.slice('--agents='.length));
-    else if (a === '--since') r.since = argv[++i];
-    else if (a.startsWith('--since=')) r.since = a.slice('--since='.length);
+    else if (a === '--since') { r.since = argv[++i]; r.sinceExplicit = true; }
+    else if (a.startsWith('--since=')) { r.since = a.slice('--since='.length); r.sinceExplicit = true; }
     else if (a === '--all') r.all = true;
     else if (a === '--yes' || a === '-y') r.yes = true;
     else if (a === '--dry-run') r.dryRun = true;
@@ -453,6 +549,18 @@ async function runBackfill(argv) {
   if (agents.length === 0) {
     err('No connected agents to backfill (nothing has a stored token). Run `attribut connect` first, or pass --agents.');
     return 2;
+  }
+
+  // Interactive invocation (`attribut backfill` on a TTY without non-interactive
+  // intent) → the polished flow: confirm → period picker → per-connector tally →
+  // progress bar. A period flag (--since/--all) or an explicit non-interactive
+  // flag (--yes/--dry-run) opts into the scripted path below; --agents just scopes
+  // which tools and still gets the polished flow. Tests run non-TTY, so they never
+  // take this branch.
+  const scripted = opts.all || opts.sinceExplicit || opts.yes || opts.dryRun;
+  if (!scripted && process.stdout.isTTY && process.stdin.isTTY) {
+    await runBackfillInteractive({ connected: agents.map((a) => ({ agent: a })) });
+    return 0;
   }
 
   // `--since` consumed with no following value → r.since is undefined. Treat that
@@ -500,8 +608,16 @@ async function runBackfill(argv) {
     }
   }
 
-  const { summary } = await uploadAll(result.perAgent, { onProgress: progressWriter() });
-  out(finalLine(summary));
+  const bar = await ui.progressBar({ max: result.total });
+  bar.start('Backfilling…');
+  const { summary, failures } = await uploadAll(result.perAgent, {
+    onProgress: ({ agent, done: agentDone, total: agentTotal }) => {
+      bar.advance(1, `${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
+    },
+  });
+  bar.stop(finalLine(summary));
+  const skipped = failureSummary(failures);
+  if (skipped) await ui.log.info(skipped);
   return 0;
 }
 
@@ -512,5 +628,8 @@ module.exports = {
   enumerate,
   parseSince,
   asyncPool,
+  uploadAll,
+  failureSummary,
+  defaultConcurrency,
   AGENT_SLUGS,
 };

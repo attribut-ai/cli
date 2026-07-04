@@ -38,6 +38,7 @@ const { URL } = require('url');
 const { getOrCreateDeviceUuid } = require('./device.cjs');
 const installer = require('./install.cjs');
 const timer = require('./timer.cjs');
+const ui = require('./ui.cjs');
 const { version: PKG_VERSION } = require('../package.json');
 
 const DEFAULT_APP_BASE = 'https://attribut.ai';
@@ -225,8 +226,9 @@ function postJson(urlStr, body, { bearer, timeoutMs = 15000 } = {}) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Resolve which agents to connect: an explicit --agents list (validated), else an
-// interactive numbered prompt, else (non-TTY, no flag) a logged default. Returns
-// a deduped list of installable slugs, or [] if the user picked nothing.
+// interactive multi-select (clack), else (non-TTY, no flag) a logged default.
+// Returns a deduped list of installable slugs, [] if the user picked nothing, or
+// null if the user cancelled the prompt (caller aborts without changes).
 async function resolveAgents(opts) {
   if (opts.agents) return validateAgents(opts.agents);
 
@@ -236,6 +238,20 @@ async function resolveAgents(opts) {
     return ['claude_code'];
   }
 
+  // Preferred path: the polished arrow/space multi-select. If clack can't load
+  // (unexpected — it's a dependency), fall back to the numbered prompt so
+  // `connect` still works.
+  try {
+    const picked = await ui.selectAgents(AGENTS);
+    if (picked === null) return null; // user cancelled
+    return [...new Set(picked)];
+  } catch {
+    return numberedSelect();
+  }
+}
+
+// Numbered-prompt fallback for when the interactive multi-select is unavailable.
+async function numberedSelect() {
   out('Which tools on this device should ATTRIBUT capture?');
   AGENTS.forEach((a, i) => out(`  ${i + 1}) ${a.label}  [${a.slug}]`));
   const answer = await prompt(
@@ -304,7 +320,11 @@ async function runConnect(argv) {
   // remote/cloud-sandbox path — no browser, no prompts, no polling.
   if (opts.key) return runTokenConnect(opts);
 
+  ui.showBanner();
+  await ui.intro('Connect this device to ATTRIBUT');
+
   const agents = await resolveAgents(opts);
+  if (agents === null) return 0; // user cancelled the prompt — nothing changed
   if (agents.length === 0) {
     err('No installable tools selected — nothing to connect.');
     return 2;
@@ -326,16 +346,18 @@ async function runConnect(argv) {
     err(`Device start failed (HTTP ${start.status}): ${(start.json && start.json.error) || start.text || 'unknown error'}`);
     return 1;
   }
-  const { userCode, verificationUrl, expireAt } = start.json;
+  const { verificationUrl, expireAt } = start.json;
 
-  // 2) Tell the user where to approve (and try to open it for them).
-  out('');
-  out(`  Open:  ${verificationUrl}`);
-  out(`  Code:  ${userCode}`);
-  if (openBrowser(verificationUrl, opts)) out('  (opened your browser…)');
-  else out('  (open the link above on any device and enter the code)');
-  out('');
-  out('Waiting for approval…');
+  // 2) Tell the user where to approve (and try to open it for them). The
+  // verification URL already carries the code and the approval page has no code
+  // field, so we show only the link — no separate code to read or type.
+  const opened = openBrowser(verificationUrl, opts);
+  await ui.note(
+    `${verificationUrl}\n\n${
+      opened ? 'Opened in your browser — approve there.' : 'Open this link on any device to approve.'
+    }`,
+    'Approve this device'
+  );
 
   // 3) Poll until approved / expired / deadline. Guard the env override: a
   // non-numeric/NaN or <=0 value would make sleep() spin and hammer the server,
@@ -344,6 +366,8 @@ async function runConnect(argv) {
   const rawInterval = Number.parseInt(process.env.ATTRIBUT_POLL_INTERVAL_MS, 10);
   const interval = Number.isFinite(rawInterval) && rawInterval > 0 ? Math.max(5, rawInterval) : 3000;
   const deadline = Date.parse(expireAt) || Date.now() + 10 * 60 * 1000;
+  const spin = await ui.spinner();
+  spin.start('Waiting for approval…');
   let configs = null;
   while (Date.now() < deadline) {
     await sleep(interval);
@@ -351,6 +375,7 @@ async function runConnect(argv) {
     try {
       poll = await postJson(`${appBase}/api/device/poll`, { deviceCode });
     } catch (e) {
+      spin.stop('Approval check failed', 2);
       err(`Poll failed: ${e.message}`);
       return 1;
     }
@@ -360,15 +385,18 @@ async function runConnect(argv) {
       break;
     }
     if (status === 'expired') {
+      spin.stop('Request expired', 2);
       err('The request expired before it was approved. Re-run `attribut connect`.');
       return 1;
     }
     // 'pending' (or anything else) → keep waiting.
   }
   if (!configs) {
+    spin.stop('Timed out', 2);
     err('Timed out waiting for approval. Re-run `attribut connect`.');
     return 1;
   }
+  spin.stop('Approved');
 
   // 4) Install each agent's hook (persisting its per-agent token) + emit.
   const sampleEndpoint = configs.find((c) => c.endpoint)?.endpoint || null;
@@ -378,15 +406,15 @@ async function runConnect(argv) {
 
   for (const cfg of configs) {
     if (!installer.INSTALLABLE_AGENTS.includes(cfg.agent)) {
-      err(`  Skipping "${cfg.agent}" — no hook installer on this CLI version.`);
+      await ui.log.warn(`Skipping "${cfg.agent}" — no hook installer on this CLI version.`);
       continue;
     }
     try {
       installer.registerAgent({ agent: cfg.agent, token: cfg.token, ingestBase });
       connected.push(cfg);
-      out(`  ✓ Installed capture hook for ${cfg.agent}`);
+      await ui.log.success(`Installed capture hook for ${cfg.agent}`);
     } catch (e) {
-      err(`  ✗ Could not install ${cfg.agent}: ${e.message}`);
+      await ui.log.error(`Could not install ${cfg.agent}: ${e.message}`);
       return 1; // a real install failure is fatal
     }
   }
@@ -404,9 +432,10 @@ async function runConnect(argv) {
   // once per connect, not per agent: it's a device-level liveness signal.
   timer.installTimer();
 
-  out('');
-  out(`✓ Connection established for: ${connected.map((c) => c.agent).join(', ')}`);
-  out('  (Restart any running sessions to pick up the hook.)');
+  // The connection itself is now COMPLETE and successful. Mark it clearly — the
+  // backfill below is a bonus step whose outcome must never make the connection
+  // look like it failed.
+  await ui.log.success(`Connection established for: ${connected.map((c) => c.agent).join(', ')}`);
 
   // 7) Offer a one-time backfill of pre-connect local history (opt-in, default
   // yes, TTY only). --no-backfill skips it. Never fatal — the connection already
@@ -415,9 +444,16 @@ async function runConnect(argv) {
     try {
       await require('./backfill.cjs').runBackfillInteractive({ connected, ingestBase });
     } catch (e) {
-      err(`  (note: backfill skipped: ${e.message})`);
+      await ui.log.info(`Backfill skipped: ${e.message}`);
     }
   }
+
+  // Final, unmistakable closer. Whatever backfill did or skipped, the connection
+  // succeeded — this is the last thing the user sees.
+  await ui.outro(
+    `You're all set — ATTRIBUT is now capturing ${connected.map((c) => c.agent).join(', ')}.\n` +
+      '  Restart any running sessions to pick up the hook.'
+  );
   return 0;
 }
 
