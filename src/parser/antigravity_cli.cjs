@@ -43,7 +43,7 @@ const agyTokens = require('./antigravity_tokens.cjs');
 
 // String caps, mirroring the schema's maxLength bounds (defense-in-depth).
 const CAP_TITLE = 200;
-const CAP_PATH = 256; // repo / branch
+const CAP_PATH = 256; // branch
 const CAP_LABEL = 128; // model / version / reason / agent_type / status
 
 function cap(s, n) {
