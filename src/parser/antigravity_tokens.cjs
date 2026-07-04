@@ -178,10 +178,6 @@ function collectVarints(buf, prefix, out, depth) {
   }
 }
 
-// Central helper to load a SQLite database driver class.
-// Mimics Node's `DatabaseSync` interface so that we support both node:sqlite and better-sqlite3 seamlessly.
-// Memoized: driver availability can't change mid-process, so the `require` resolution
-// (including a permanent null when no driver exists) is cached after the first call.
 // Suppress node:sqlite's one-time ExperimentalWarning ONLY for the duration of a
 // synchronous callback, restoring process.emitWarning immediately afterward. A
 // PERSISTENT override of process.emitWarning breaks tooling that depends on it
@@ -202,49 +198,21 @@ function withoutSqliteExperimentalWarning(fn) {
   }
 }
 
+// Load Node's built-in SQLite driver (`DatabaseSync`). The package requires Node
+// >=22.5 (see engines), where node:sqlite is always present, so this normally
+// resolves; a null return only happens on a broken/patched runtime, and every
+// caller is fail-safe against it (degrades to an empty read, never throws).
+// Memoized — driver availability can't change mid-process.
 let _databaseClass; // undefined = not yet resolved; null = resolved-unavailable
 function getDatabaseClass() {
   if (_databaseClass !== undefined) return _databaseClass;
   try {
     const { DatabaseSync } = withoutSqliteExperimentalWarning(() => require('node:sqlite'));
-    if (DatabaseSync) {
-      _databaseClass = DatabaseSync;
-      return _databaseClass;
-    }
+    _databaseClass = DatabaseSync || null;
   } catch {
-    /* fallback to better-sqlite3 */
+    _databaseClass = null; // node:sqlite unavailable — cache the negative result
   }
-
-  try {
-    const BetterSqlite3 = require('better-sqlite3');
-    _databaseClass = class DatabaseSyncFallback {
-      constructor(path, options) {
-        const readonly = !!(options && options.readOnly);
-        this.db = new BetterSqlite3(path, { readonly });
-      }
-      exec(sql) {
-        this.db.exec(sql);
-      }
-      prepare(sql) {
-        const stmt = this.db.prepare(sql);
-        return {
-          all(...args) {
-            return stmt.all(...args);
-          },
-          run(...args) {
-            return stmt.run(...args);
-          }
-        };
-      }
-      close() {
-        this.db.close();
-      }
-    };
-    return _databaseClass;
-  } catch {
-    _databaseClass = null; // no driver available — cache the negative result
-    return _databaseClass;
-  }
+  return _databaseClass;
 }
 
 // --- public API --------------------------------------------------------------
