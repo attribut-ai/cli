@@ -347,6 +347,40 @@ tail-read. `SessionEnd` / `Stop` always reconcile the full session.
 | `ATTRIBUT_LAUNCHD_DIR` | override the launchd LaunchAgents dir the heartbeat timer installs into (macOS) | `~/Library/LaunchAgents` |
 | `ATTRIBUT_SYSTEMD_USER_DIR` | override the systemd `--user` unit dir the heartbeat timer installs into (Linux) | `~/.config/systemd/user` |
 | `ATTRIBUT_SKIP_TIMER_ACTIVATION` | `1` writes the heartbeat timer's unit/task file(s) but skips the real launchctl/systemctl/schtasks call (tests only) | — |
+| `ATTRIBUT_NO_AUTO_UPDATE` | any value disables background auto-update (see Updating) | — |
+| `ATTRIBUT_NO_UPDATE_NOTIFIER` / `NO_UPDATE_NOTIFIER` | any value disables the interactive "update available" notice | — |
+
+## Updating
+
+```sh
+attribut update                # update to the latest release
+attribut update --to=1.2.3     # pin an exact version
+attribut version               # show installed version + build SHA
+```
+
+`attribut update` updates npm global installs in place (hooks reference the
+stable `npm root -g` path, so nothing else changes). If the CLI is running from
+an ephemeral `npx` cache, it heals the install: `npm i -g attribut`, then
+re-points every registered hook and the heartbeat timer at the durable path
+(`attribut install --rebake` under the hood). pnpm/bun/yarn global installs are
+never touched by npm — the command prints the right update command for that
+package manager instead.
+
+**Background auto-update.** The hourly heartbeat's response may carry a
+server-pinned version (`update_to`). When it does, the CLI converges to that
+exact version — never a blind `@latest` pull, so rollout and rollback are
+controlled server-side, and every release is published with npm provenance
+attestations from this repository's CI. It only ever acts on an unambiguous,
+writable npm global install; at most one attempt per version per 4 hours; a
+skipped device simply keeps reporting its `cli_version` and shows up as stale.
+Opt out durably with `attribut update --auto=off` (marker file under
+`~/.attribut`, survives timers' sparse env) or per-process with
+`ATTRIBUT_NO_AUTO_UPDATE=1`. Auto-update never runs on Windows, under CI, or
+from pnpm/bun/yarn/npx/source installs.
+
+**Interactive nudge.** `connect` / `audit` / `backfill` print a one-line
+"update available" notice on stderr when the npm registry has a newer version —
+TTY-only, checked at most once a day, never in CI, silent on any failure.
 
 ## Hook modes
 
