@@ -27,6 +27,7 @@ const settingsAgy = require('./settings_agy.cjs');
 const settingsCodex = require('./settings_codex.cjs');
 const settingsCursor = require('./settings_cursor.cjs');
 const tokenStore = require('./token.cjs');
+const updater = require('./update.cjs');
 
 // Providers this installer can register. 'anthropic' = Claude Code (settings.json
 // hooks); 'antigravity' = Google Antigravity (~/.gemini/config/hooks.json);
@@ -46,6 +47,18 @@ const INSTALLABLE_AGENTS = Object.keys(AGENT_PROVIDER);
 /** Absolute path to the collector this command will register as the hook. */
 function collectorPath() {
   return path.resolve(__dirname, 'collector.cjs');
+}
+
+/**
+ * The collector path hooks are baked against. Normally collectorPath(); when
+ * running from an ephemeral npx/dlx cache (`npx attribut connect`), first heal
+ * onto a durable `npm i -g` install and bake THAT path — an npx cache path
+ * can be pruned at any time, silently killing the hooks (timer.cjs dodges the
+ * same trap for the timer). Falls back to the ephemeral path with a loud
+ * warning when the global install fails. Memoized per process by update.cjs.
+ */
+function hookCollectorPath() {
+  return updater.ensureDurableCollector(collectorPath());
 }
 
 /** The legacy copy-based install dir (old cli). Override via env for tests. */
@@ -70,7 +83,7 @@ function shquote(s) {
  * `--endpoint=<origin>`, and `-h`/`--help`. Returns { key, endpoint, help }.
  */
 function parseArgs(argv) {
-  const result = { key: null, endpoint: null, provider: DEFAULT_PROVIDER, help: false };
+  const result = { key: null, endpoint: null, provider: DEFAULT_PROVIDER, help: false, rebake: false };
   const positionals = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -80,6 +93,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--endpoint=')) result.endpoint = a.slice('--endpoint='.length);
     else if (a === '--provider') result.provider = argv[++i];
     else if (a.startsWith('--provider=')) result.provider = a.slice('--provider='.length);
+    else if (a === '--rebake') result.rebake = true;
     else if (a === '-h' || a === '--help') result.help = true;
     else if (!a.startsWith('-')) positionals.push(a);
   }
@@ -257,11 +271,15 @@ and backs up settings first.
  * `attribut install [--key=<token>] [--endpoint=<origin>]`. Returns an exit code.
  */
 function runInstall(argv) {
-  const { key, endpoint, provider, help } = parseArgs(argv || []);
+  const { key, endpoint, provider, help, rebake } = parseArgs(argv || []);
   if (help) {
     out(INSTALL_HELP.trimStart());
     return 0;
   }
+  // --rebake re-points every existing ATTRIBUT hook at THIS collector without
+  // touching tokens — used by `attribut update` after healing an install onto
+  // a new path. No provider/key args apply.
+  if (rebake) return runRebake();
   if (!PROVIDERS.has(provider)) {
     err(`Unknown --provider "${provider}". Expected one of: ${[...PROVIDERS].join(', ')}.`);
     return 2;
@@ -272,7 +290,7 @@ function runInstall(argv) {
     return 2;
   }
 
-  const collector = collectorPath();
+  const collector = hookCollectorPath();
   const ingestBase = endpoint ? String(endpoint).replace(/\/+$/, '') : null;
 
   // A custom endpoint must be https (the token would otherwise travel cleartext).
@@ -550,7 +568,7 @@ function registerAgent({ agent, token, ingestBase }) {
   // legacy bare token to claude_code on first per-agent write).
   tokenStore.writeToken(token, agent);
 
-  const collector = collectorPath();
+  const collector = hookCollectorPath();
   const base = ingestBase ? String(ingestBase).replace(/\/+$/, '') : null;
 
   if (provider === 'antigravity') {
@@ -569,6 +587,114 @@ function registerAgent({ agent, token, ingestBase }) {
   return settings.applyHooks(hooksMap, settings.settingsPath(), isOurCommand);
 }
 
+// A baked collector command from ANY prior install of this package — durable
+// global (`…/node_modules/attribut/src/collector.cjs`) or npx-ephemeral
+// (`…/_npx/<hash>/node_modules/attribut/src/collector.cjs`). Rebake must match
+// these even though they are not THIS process's collectorPath().
+const ANY_COLLECTOR_RE = /attribut[\\/]src[\\/]collector\.cjs/;
+
+/** isOurCommand widened to collector paths baked by OTHER installs of this
+ * package — exactly what a rebake exists to replace. */
+function isOurCommandAnyInstall(command) {
+  if (typeof command !== 'string') return false;
+  return isOurCommand(command) || ANY_COLLECTOR_RE.test(command);
+}
+
+/** First INGEST_BASE='…' baked into existing hook commands, or null. Rebake
+ * preserves a custom endpoint instead of silently resetting it. */
+function extractIngestBase(rawText) {
+  const m = /INGEST_BASE='([^']+)'/.exec(rawText);
+  return m ? m[1] : null;
+}
+
+function readRawIfExists(p) {
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `attribut install --rebake` — re-point every EXISTING ATTRIBUT hook (all
+ * providers) plus the heartbeat timer at THIS process's collector path.
+ * Tokens are untouched (must already exist); providers without our hooks are
+ * left alone. Run by `attribut update` from the freshly installed package
+ * after a path-changing update (npx→durable heal). Fail-loud per policy, but
+ * one provider's corrupt settings file must not strand the others — errors
+ * are reported and the exit code reflects any failure.
+ */
+function runRebake() {
+  if (!tokenStore.readToken()) {
+    err('No ingest token found — run `attribut connect` (or `attribut install --key=…`) first.');
+    return 1;
+  }
+  const collector = collectorPath();
+  let rebaked = 0;
+  let failed = 0;
+
+  const providers = [
+    {
+      name: 'claude code',
+      file: settings.settingsPath(),
+      apply: (ingestBase) =>
+        settings.applyHooks(
+          buildHooksMap({ collector, ingestBase }),
+          settings.settingsPath(),
+          isOurCommandAnyInstall
+        ),
+    },
+    {
+      name: 'antigravity',
+      file: settingsAgy.agyHooksPath(),
+      apply: (ingestBase) => settingsAgy.applyAgyHooks(buildAgyHookSpec({ collector, ingestBase })),
+    },
+    {
+      name: 'codex',
+      file: settingsCodex.codexConfigPath(),
+      apply: (ingestBase) =>
+        settingsCodex.applyCodexHooks(
+          buildCodexHookSpecs({ collector, ingestBase }),
+          isOurCommandAnyInstall
+        ),
+    },
+    {
+      name: 'cursor',
+      file: settingsCursor.cursorHooksPath(),
+      apply: (ingestBase) =>
+        settingsCursor.applyCursorHooks(
+          buildCursorHookSpecs({ collector, ingestBase }),
+          isOurCommandAnyInstall
+        ),
+    },
+  ];
+
+  for (const p of providers) {
+    const raw = readRawIfExists(p.file);
+    if (!raw || !isOurCommandAnyInstall(raw)) continue;
+    try {
+      p.apply(extractIngestBase(raw));
+      out(`Re-baked ${p.name} hooks in ${p.file}`);
+      rebaked += 1;
+    } catch (e) {
+      err(`Could not re-bake ${p.name} hooks in ${p.file}: ${e.message}`);
+      failed += 1;
+    }
+  }
+
+  // The heartbeat timer bakes its own argv — refresh it too if one is
+  // installed. Required lazily (timer.cjs requires this module).
+  const timer = require('./timer.cjs');
+  const timerFile = process.platform === 'darwin' ? timer.launchdPlistPath() : timer.systemdTimerPath();
+  if (process.platform !== 'win32' && fs.existsSync(timerFile)) {
+    timer.installTimer(); // best-effort; reports its own errors
+  }
+
+  if (rebaked === 0 && failed === 0) out('No ATTRIBUT hooks found to re-bake.');
+  else out(`Hooks now run ${collector}`);
+  return failed > 0 ? 1 : 0;
+}
+
 module.exports = {
   collectorPath,
   parseArgs,
@@ -581,8 +707,10 @@ module.exports = {
   isOurCodexEntry,
   isOurCursorEntry,
   isOurCommand,
+  isOurCommandAnyInstall,
   runInstall,
   runUninstall,
+  runRebake,
   registerAgent,
   AGENT_PROVIDER,
   INSTALLABLE_AGENTS,

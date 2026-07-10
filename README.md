@@ -189,6 +189,22 @@ found and how far back they go, then lets you pick **last 90 days** (default),
 offer. Run `attribut backfill` yourself anytime to import a wider/narrower window
 later.
 
+**How far back `--all` reaches depends on the tool, not on attribut.** Backfill
+can only send what each tool still keeps on disk, and the tools differ:
+
+- **Claude Code** deletes transcripts older than its `cleanupPeriodDays` setting
+  (**default 30 days**). So a fresh `--all` typically reaches back ~30 days even
+  if you've used it for months. To keep more, raise it in `~/.claude/settings.json`
+  (e.g. `"cleanupPeriodDays": 365`) — this only affects sessions going *forward*;
+  already-deleted transcripts are gone.
+- **Cursor** keeps a long history in its local `state.vscdb` (often many months).
+- **Codex** and **Antigravity** retain their on-disk session records until you
+  remove them; how far back `--all` reaches tracks how long you've used the tool.
+
+Because live capture posts each new session at session-end regardless of these
+policies, backfill only ever matters for the window *before* you connected — and
+even then only as far back as the tool still has the data.
+
 Re-sending is safe: the server reconciles by `sessionId` (*latest non-partial
 wins*), so a session already captured live — or backfilled twice — just overwrites
 in place. It never double-counts. `--dry-run` prints the envelopes it *would* send
@@ -331,6 +347,40 @@ tail-read. `SessionEnd` / `Stop` always reconcile the full session.
 | `ATTRIBUT_LAUNCHD_DIR` | override the launchd LaunchAgents dir the heartbeat timer installs into (macOS) | `~/Library/LaunchAgents` |
 | `ATTRIBUT_SYSTEMD_USER_DIR` | override the systemd `--user` unit dir the heartbeat timer installs into (Linux) | `~/.config/systemd/user` |
 | `ATTRIBUT_SKIP_TIMER_ACTIVATION` | `1` writes the heartbeat timer's unit/task file(s) but skips the real launchctl/systemctl/schtasks call (tests only) | — |
+| `ATTRIBUT_NO_AUTO_UPDATE` | any value disables background auto-update (see Updating) | — |
+| `ATTRIBUT_NO_UPDATE_NOTIFIER` / `NO_UPDATE_NOTIFIER` | any value disables the interactive "update available" notice | — |
+
+## Updating
+
+```sh
+attribut update                # update to the latest release
+attribut update --to=1.2.3     # pin an exact version
+attribut version               # show installed version + build SHA
+```
+
+`attribut update` updates npm global installs in place (hooks reference the
+stable `npm root -g` path, so nothing else changes). If the CLI is running from
+an ephemeral `npx` cache, it heals the install: `npm i -g attribut`, then
+re-points every registered hook and the heartbeat timer at the durable path
+(`attribut install --rebake` under the hood). pnpm/bun/yarn global installs are
+never touched by npm — the command prints the right update command for that
+package manager instead.
+
+**Background auto-update.** The hourly heartbeat's response may carry a
+server-pinned version (`update_to`). When it does, the CLI converges to that
+exact version — never a blind `@latest` pull, so rollout and rollback are
+controlled server-side, and every release is published with npm provenance
+attestations from this repository's CI. It only ever acts on an unambiguous,
+writable npm global install; at most one attempt per version per 4 hours; a
+skipped device simply keeps reporting its `cli_version` and shows up as stale.
+Opt out durably with `attribut update --auto=off` (marker file under
+`~/.attribut`, survives timers' sparse env) or per-process with
+`ATTRIBUT_NO_AUTO_UPDATE=1`. Auto-update never runs on Windows, under CI, or
+from pnpm/bun/yarn/npx/source installs.
+
+**Interactive nudge.** `connect` / `audit` / `backfill` print a one-line
+"update available" notice on stderr when the npm registry has a newer version —
+TTY-only, checked at most once a day, never in CI, silent on any failure.
 
 ## Hook modes
 

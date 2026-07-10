@@ -24,6 +24,8 @@ Files → articles (in numeric order):
 | `04-manual-install-and-removal.md` | Manual install & removing ATTRIBUT |
 | `05-audit-verify-privacy.md` | Verify it yourself with `attribut audit` |
 | `06-troubleshooting-and-config.md` | Troubleshooting & configuration |
+| `07-connect-claude-code-cloud.md` | Connect Claude Code cloud environments to ATTRIBUT |
+| `08-backfill-past-sessions.md` | Backfilling past sessions |
 
 All articles are placed under one Collection (default **`ATTRIBUT CLI
 Connector`**). In Intercom the hierarchy is *Help Center → Collection →
