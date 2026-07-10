@@ -260,6 +260,14 @@ first), which makes `attribut heartbeat` useful as a standalone smoke test.
 `--dry-run` prints the payload instead of sending it (works with or without a
 token configured).
 
+**Response** — normally `{"status":"ok"}`. The server may add
+`"update_to": "<exact semver>"` (the ingest worker's `CLI_UPDATE_TO` var):
+the fleet rollout/rollback directive for background auto-update. The CLI
+then converges to that pinned version, subject to every guardrail and
+opt-out described under [Updating](#updating) — the directive is applied
+*after* the POST, so telemetry is never delayed, and an empty or non-JSON
+response body is a silent no-op (old servers stay compatible forever).
+
 ### `machine_id`
 
 Distinct from `device_uuid` (which ATTRIBUT itself mints): `machine_id` ties
@@ -293,8 +301,14 @@ attribut help            # list commands
 `install` registers `PostToolUse(Bash)` + `SessionEnd` + `Stop` hooks in
 `~/.claude/settings.json`, each invoking **this installed package's**
 `collector.cjs` by absolute path. Nothing is copied — the collector needs its
-`node_modules` (ajv), so the package must be durably installed (`npm i -g`, not
-ephemeral `npx`) for the path to stay valid.
+`node_modules` (ajv), so the baked path must be a durable `npm i -g` install,
+not an ephemeral `npx` cache (which npx can prune at any time). Since v1.1.0,
+running `install`/`connect` from an npx cache **heals itself**: it installs
+the same version globally first and bakes the durable path (falling back, with
+a loud warning, to the ephemeral path if the global install fails). Installs
+that predate the heal are fixed by one `attribut update`, which re-bakes every
+registered hook and the heartbeat timer (`attribut install --rebake` under the
+hood).
 
 The **ingest token is never written into the hook command or `settings.json`** —
 that would leave it world-readable and expose it in `ps`. Instead it is persisted
@@ -448,6 +462,11 @@ The collector logs every action to **stderr** prefixed with `[attribut]`, and
   `no ingest token …`. The latter means the `0600` token file is missing —
   re-run `attribut install --key=<token>`.
 - **Verify offline**, without posting, using `--parse` / `--dry-run` (above).
+- **Hooks silently stopped firing**, or your hook commands reference a path
+  under `~/.npm/_npx/…`: an old install baked an ephemeral npx cache path that
+  npx has since pruned (fixed in v1.1.0). Run `npm i -g attribut` then
+  `attribut update` — it re-bakes every hook and the heartbeat timer onto the
+  durable install.
 - After installing, **restart any running sessions** (Claude Code, Codex,
   Cursor, Antigravity) to pick up the hook.
 
