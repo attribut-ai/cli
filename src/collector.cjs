@@ -699,6 +699,10 @@ Commands:
   backfill     Send your EXISTING local sessions (pre-connect history) to ATTRIBUT.
                  attribut backfill [--agents=a,b] [--since=90d|<ISO>] [--all]
                                    [--yes] [--dry-run]
+  update       Update this CLI (npm installs update in place; npx installs are
+               healed onto a durable global install and hooks re-baked).
+                 attribut update [--to=<version>] | --auto=on|off
+  version      Print the installed version and build SHA
   help         Show this help
 
 As a Claude Code hook the collector is invoked with a trigger
@@ -716,12 +720,23 @@ async function main() {
 
   // Management subcommands run BEFORE any stdin/hook handling.
   const sub = argv[0];
+  if (sub === 'version' || sub === '--version' || sub === '-v') {
+    process.stdout.write(`attribut ${PKG_VERSION} (${GIT_SHA})\n`);
+    return 0;
+  }
+  // The interactive management commands get a one-line "update available"
+  // nudge (TTY-only, 24h-cached, silent on any failure — see update.cjs).
+  // Never on the hook hot path or heartbeat: those are non-interactive.
+  if (sub === 'connect' || sub === 'audit' || sub === 'backfill') {
+    await require('./update.cjs').maybeNotifyUpdate();
+  }
   if (sub === 'install') return require('./install.cjs').runInstall(argv.slice(1));
   if (sub === 'uninstall') return require('./install.cjs').runUninstall(argv.slice(1));
   if (sub === 'connect') return require('./connect.cjs').runConnect(argv.slice(1));
   if (sub === 'heartbeat') return require('./heartbeat.cjs').runHeartbeat(argv.slice(1));
   if (sub === 'audit') return require('./audit.cjs').runAudit(argv.slice(1));
   if (sub === 'backfill') return require('./backfill.cjs').runBackfill(argv.slice(1));
+  if (sub === 'update') return require('./update.cjs').runUpdate(argv.slice(1));
   if (sub === 'help' || sub === '--help' || sub === '-h') {
     printHelp();
     return 0;
@@ -939,6 +954,7 @@ const MANAGEMENT_COMMANDS = new Set([
   'heartbeat',
   'audit',
   'backfill',
+  'update',
 ]);
 
 // Top-level: a normally-returned code is honored. An UNCAUGHT error is logged;

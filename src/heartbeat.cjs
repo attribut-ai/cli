@@ -116,7 +116,7 @@ function postJson(urlStr, body, { bearer, timeoutMs = 5000 } = {}) {
         data += c;
       });
       res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve({ status: res.statusCode });
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve({ status: res.statusCode, body: data });
         else reject(new Error(`heartbeat POST returned HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
       });
     });
@@ -177,8 +177,12 @@ async function runHeartbeat(argv) {
   const payload = buildHeartbeatPayload();
 
   try {
-    await postJson(endpoint(), payload, { bearer: tok });
+    const res = await postJson(endpoint(), payload, { bearer: tok });
     log(`heartbeat sent → ${endpoint()}`);
+    // The response may carry a server-pinned CLI version (the fleet
+    // rollout/rollback lever) — apply it AFTER the POST so telemetry is never
+    // delayed, and inside the same never-fail-loud envelope as the POST.
+    await handleUpdateDirective(res.body);
   } catch (e) {
     // Never fail loud here — see FAILURE POLICY above.
     log(`heartbeat failed (non-fatal): ${e.message}`);
@@ -186,9 +190,41 @@ async function runHeartbeat(argv) {
   return 0;
 }
 
+/**
+ * Act on the heartbeat response body: `{ "update_to": "<exact version>" }`
+ * triggers the guardrailed self-update (update.cjs decides whether it may
+ * act). Anything else — empty body, non-JSON, missing/odd field — is a
+ * silent no-op: old servers return nothing and that must stay fine forever.
+ * NEVER throws. `autoUpdate` is injectable for tests.
+ */
+async function handleUpdateDirective(bodyText, { autoUpdate } = {}) {
+  let updateTo;
+  try {
+    const parsed = JSON.parse(bodyText);
+    updateTo = parsed && typeof parsed === 'object' ? parsed.update_to : undefined;
+  } catch {
+    return null;
+  }
+  if (typeof updateTo !== 'string' || updateTo === '') return null;
+  try {
+    const run = autoUpdate || require('./update.cjs').maybeAutoUpdate;
+    const result = await run({ updateTo });
+    // One line for launchd/systemd logs — except the hourly steady state
+    // (server pins the version we already run), which isn't worth the noise.
+    if (result.reason !== 'already current') {
+      log(`auto-update (server pinned ${updateTo}): ${result.reason}`);
+    }
+    return result;
+  } catch (e) {
+    log(`auto-update failed (non-fatal): ${e && e.message ? e.message : e}`);
+    return null;
+  }
+}
+
 module.exports = {
   runHeartbeat,
   buildHeartbeatPayload,
+  handleUpdateDirective,
   postJson,
   endpoint,
   HEARTBEAT_HELP,
