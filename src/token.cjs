@@ -118,7 +118,12 @@ function writeToken(key, agent) {
 function removeToken(agent) {
   const parsed = readRaw();
   if (!parsed) return false;
-  if (agent && parsed.map && parsed.bare == null) {
+  if (agent) {
+    // Scoped removal applies only to the per-agent map (written by `connect`).
+    // A bare token is a single shared credential we can't attribute to one
+    // agent, so a scoped uninstall must leave it for the remaining agents — a
+    // full `uninstall` (no agent) is what drops it. Return false = untouched.
+    if (!parsed.map) return false;
     if (!(agent in parsed.map)) return false;
     delete parsed.map[agent];
     if (Object.keys(parsed.map).length === 0) {

@@ -83,7 +83,18 @@ function shquote(s) {
  * `--endpoint=<origin>`, and `-h`/`--help`. Returns { key, endpoint, help }.
  */
 function parseArgs(argv) {
-  const result = { key: null, endpoint: null, provider: DEFAULT_PROVIDER, help: false, rebake: false };
+  // `providerExplicit` distinguishes "no --provider" (full, every-agent
+  // disconnect on uninstall) from an explicit `--provider=anthropic` (scope to
+  // Claude only). `provider` still defaults to anthropic so install's
+  // Claude-first behaviour is unchanged.
+  const result = {
+    key: null,
+    endpoint: null,
+    provider: DEFAULT_PROVIDER,
+    providerExplicit: false,
+    help: false,
+    rebake: false,
+  };
   const positionals = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -91,9 +102,13 @@ function parseArgs(argv) {
     else if (a.startsWith('--key=')) result.key = a.slice('--key='.length);
     else if (a === '--endpoint') result.endpoint = argv[++i];
     else if (a.startsWith('--endpoint=')) result.endpoint = a.slice('--endpoint='.length);
-    else if (a === '--provider') result.provider = argv[++i];
-    else if (a.startsWith('--provider=')) result.provider = a.slice('--provider='.length);
-    else if (a === '--rebake') result.rebake = true;
+    else if (a === '--provider') {
+      result.provider = argv[++i];
+      result.providerExplicit = true;
+    } else if (a.startsWith('--provider=')) {
+      result.provider = a.slice('--provider='.length);
+      result.providerExplicit = true;
+    } else if (a === '--rebake') result.rebake = true;
     else if (a === '-h' || a === '--help') result.help = true;
     else if (!a.startsWith('-')) positionals.push(a);
   }
@@ -239,32 +254,42 @@ function isOurCommand(command) {
 }
 
 const INSTALL_HELP = `
-attribut install — register the ATTRIBUT capture hook for Claude Code
+attribut install — register the ATTRIBUT capture hook (Claude Code by default)
 
 Usage:
-  attribut install --key=<ingest-token> [--endpoint=<origin>]
+  attribut install --key=<ingest-token> [--endpoint=<origin>] [--provider <agent>]
 
   --key=<token>        The ATTRIBUT ingest token (also accepted as a bare arg).
   --endpoint=<origin>  Override the ingest origin (default: https://ingest.attribut.ai).
                        The collector posts to <origin>/v1/hook.
+  --provider <agent>   Which agent to install for: anthropic (Claude Code, default),
+                       openai (Codex), cursor (Cursor), antigravity (Antigravity).
   -h, --help           Show this help.
 
-Registers PostToolUse(Bash) + SessionEnd + Stop hooks in ~/.claude/settings.json,
-each invoking this installed collector. The token is stored separately in a 0600
-file (never in settings.json). Re-running is idempotent — it replaces our hooks
-in place and never duplicates.
+For Claude Code, registers PostToolUse(Bash) + SessionEnd + Stop hooks in
+~/.claude/settings.json; other agents register the equivalent hooks in their own
+config. The token is stored separately in a 0600 file (never in settings.json).
+Re-running is idempotent — it replaces our hooks in place and never duplicates.
+Most users should run \`attribut connect\` instead, which installs every chosen
+agent in one browser-approved step.
 `;
 
 const UNINSTALL_HELP = `
-attribut uninstall — remove the ATTRIBUT capture hook from Claude Code
+attribut uninstall — remove ATTRIBUT capture hooks
 
 Usage:
-  attribut uninstall
+  attribut uninstall                    full disconnect: every agent
+  attribut uninstall --provider <agent> just one agent
 
-Strips ATTRIBUT's PostToolUse/SessionEnd/Stop entries from ~/.claude/settings.json
-(unrelated hooks are preserved), removes the stored token file, and deletes any
-legacy collector files a previous install copied into ~/.claude/hooks/. Idempotent
-and backs up settings first.
+With NO --provider, this fully disconnects the device: it strips ATTRIBUT's hooks
+from EVERY agent (Claude Code, Codex, Cursor, Antigravity), deletes legacy collector
+files, drops the stored token(s), and removes the hourly heartbeat timer.
+
+With --provider <agent> (anthropic | openai | cursor | antigravity), it scopes to
+that one agent — removing just its hooks and revoking just its token, leaving the
+other agents and the heartbeat timer connected.
+
+Unrelated hooks are always preserved, and each touched config is backed up first.
 `;
 
 /**
@@ -425,84 +450,140 @@ function cleanupLegacyFiles() {
 }
 
 /**
- * `attribut uninstall`. Returns an exit code.
+ * Uninstall descriptors — one per agent we can register. Each knows how to strip
+ * its own hooks (via the matching settings module) and which per-agent token
+ * slug to revoke. Ownership predicates match hooks baked by ANY install of this
+ * package (durable global OR ephemeral npx), so a removal never orphans a hook
+ * merely because it was baked from a different collector path — the same
+ * broad-match reasoning `runRebake` uses.
+ */
+function uninstallProviders() {
+  const collector = collectorPath();
+  const codexOurs = (text) =>
+    typeof text === 'string' && (text.includes(collector) || ANY_COLLECTOR_RE.test(text));
+  const cursorOurs = (cmd) =>
+    typeof cmd === 'string' && (cmd.includes(collector) || ANY_COLLECTOR_RE.test(cmd));
+  return [
+    {
+      provider: 'anthropic',
+      name: 'Claude Code',
+      agent: 'claude_code',
+      path: () => settings.settingsPath(),
+      remove: () => settings.applyUninstall(isOurCommandAnyInstall, settings.settingsPath()),
+    },
+    {
+      provider: 'openai',
+      name: 'Codex',
+      agent: 'codex',
+      path: () => settingsCodex.codexConfigPath(),
+      remove: () => settingsCodex.applyCodexUninstall(codexOurs),
+    },
+    {
+      provider: 'cursor',
+      name: 'Cursor',
+      agent: 'cursor',
+      path: () => settingsCursor.cursorHooksPath(),
+      remove: () => settingsCursor.applyCursorUninstall(cursorOurs),
+    },
+    {
+      provider: 'antigravity',
+      name: 'Antigravity',
+      agent: 'agy',
+      path: () => settingsAgy.agyHooksPath(),
+      remove: () => settingsAgy.applyAgyUninstall(),
+    },
+  ];
+}
+
+/**
+ * `attribut uninstall [--provider <agent>]`. Returns an exit code.
+ *
+ * With NO `--provider`, this is a FULL disconnect: it strips ATTRIBUT's hooks
+ * from EVERY agent (Claude Code, Codex, Cursor, Antigravity), removes legacy
+ * collector files, drops the whole token store, and removes the device-level
+ * heartbeat timer. (Previously the no-flag path removed only Claude's hooks
+ * while still dropping every agent's token and the timer — leaving the other
+ * agents' hooks orphaned and firing without a token.)
+ *
+ * With `--provider <agent>`, it scopes to that one agent: strips just its hooks
+ * and revokes just its token. The timer and the other agents stay put, since
+ * the device may still be connected through them.
  */
 function runUninstall(argv) {
-  const { provider, help } = parseArgs(argv || []);
+  const { provider, providerExplicit, help } = parseArgs(argv || []);
   if (help) {
     out(UNINSTALL_HELP.trimStart());
     return 0;
   }
-  if (!PROVIDERS.has(provider)) {
+  if (providerExplicit && !PROVIDERS.has(provider)) {
     err(`Unknown --provider "${provider}". Expected one of: ${[...PROVIDERS].join(', ')}.`);
     return 2;
   }
 
-  if (provider === 'antigravity') {
-    let result;
-    try {
-      result = settingsAgy.applyAgyUninstall();
-    } catch (e) {
-      err(`Could not update ${settingsAgy.agyHooksPath()}: ${e.message}`);
-      return 1;
-    }
-    // The token store is shared across providers; only drop it on the antigravity
-    // uninstall if our hook was actually present (don't yank Claude's token).
-    if (result.removed === 0) {
-      out('No ATTRIBUT antigravity hook found — nothing to do.');
-      return 0;
-    }
-    if (result.backupPath) out(`  Backed up previous hooks → ${result.backupPath}`);
-    out(`Removed the ATTRIBUT hook from ${result.settingsPath}`);
-    out('ATTRIBUT capture hook removed (Antigravity).');
-    return 0;
-  }
+  const descriptors = uninstallProviders();
 
-  if (provider === 'openai') {
-    const collector = collectorPath();
+  // Scoped uninstall: one agent's hooks + one agent's token only.
+  if (providerExplicit) {
+    const target = descriptors.find((d) => d.provider === provider);
     let result;
     try {
-      result = settingsCodex.applyCodexUninstall(isOurCodexEntry(collector));
+      result = target.remove();
     } catch (e) {
-      err(`Could not update ${settingsCodex.codexConfigPath()}: ${e.message}`);
+      err(`Could not update ${target.path()}: ${e.message}`);
       return 1;
     }
-    if (result.removed === 0) {
-      out('No ATTRIBUT codex hook found — nothing to do.');
+    // Legacy copy-based files are Claude-only, so clean them on the anthropic scope.
+    let legacyRemoved = 0;
+    if (provider === 'anthropic') {
+      try {
+        legacyRemoved = cleanupLegacyFiles();
+      } catch (e) {
+        err(`Could not remove legacy collector files: ${e.message}`);
+        return 1;
+      }
+    }
+    let tokenRemoved = false;
+    try {
+      tokenRemoved = tokenStore.removeToken(target.agent);
+    } catch (e) {
+      err(`Could not remove ${target.name} token: ${e.message}`);
+      return 1;
+    }
+    if (result.removed === 0 && legacyRemoved === 0 && !tokenRemoved) {
+      out(`No ATTRIBUT ${target.name} hook found — nothing to do.`);
       return 0;
     }
     if (result.backupPath) out(`  Backed up previous config → ${result.backupPath}`);
-    out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath}`);
-    out('ATTRIBUT capture hook removed (Codex).');
+    if (result.removed > 0) {
+      out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath}`);
+    }
+    if (legacyRemoved > 0) out(`Deleted ${legacyRemoved} legacy collector file(s) from ${legacyHooksDir()}`);
+    if (tokenRemoved) out(`Revoked the stored ${target.name} token.`);
+    out(`ATTRIBUT capture hook removed (${target.name}). Other agents (if any) are still connected.`);
     return 0;
   }
 
-  if (provider === 'cursor') {
-    const collector = collectorPath();
+  // Full disconnect (no --provider): every agent's hooks, every token, the timer.
+  // One agent's corrupt/unwritable config must not strand the others, so failures
+  // are collected and reflected in the exit code rather than aborting the sweep.
+  let hadError = false;
+  let totalRemoved = 0;
+  const removedAgents = [];
+  for (const d of descriptors) {
     let result;
     try {
-      result = settingsCursor.applyCursorUninstall(isOurCursorEntry(collector));
+      result = d.remove();
     } catch (e) {
-      err(`Could not update ${settingsCursor.cursorHooksPath()}: ${e.message}`);
-      return 1;
+      err(`Could not update ${d.path()} (${d.name}): ${e.message}`);
+      hadError = true;
+      continue;
     }
-    if (result.removed === 0) {
-      out('No ATTRIBUT cursor hook found — nothing to do.');
-      return 0;
+    if (result.backupPath) out(`  Backed up previous ${d.name} config → ${result.backupPath}`);
+    if (result.removed > 0) {
+      out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath} (${d.name})`);
+      totalRemoved += result.removed;
+      removedAgents.push(d.name);
     }
-    if (result.backupPath) out(`  Backed up previous hooks → ${result.backupPath}`);
-    out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath}`);
-    out('ATTRIBUT capture hook removed (Cursor).');
-    return 0;
-  }
-
-  const p = settings.settingsPath();
-  let result;
-  try {
-    result = settings.applyUninstall(isOurCommand, p);
-  } catch (e) {
-    err(`Could not update ${p}: ${e.message}`);
-    return 1;
   }
 
   let legacyRemoved = 0;
@@ -510,38 +591,41 @@ function runUninstall(argv) {
     legacyRemoved = cleanupLegacyFiles();
   } catch (e) {
     err(`Could not remove legacy collector files: ${e.message}`);
-    return 1;
+    hadError = true;
   }
+  if (legacyRemoved > 0) out(`Deleted ${legacyRemoved} legacy collector file(s) from ${legacyHooksDir()}`);
 
-  // Drop the stored token regardless of whether hooks were present.
+  // Drop the whole token store regardless of whether hooks were present.
   let tokenRemoved = false;
   try {
     tokenRemoved = tokenStore.removeToken();
   } catch (e) {
     err(`Could not remove token file: ${e.message}`);
+    hadError = true;
+  }
+  if (tokenRemoved) out('Removed stored ingest token(s).');
+
+  // The heartbeat timer is device-level, so it only comes out on a full
+  // disconnect. Required lazily — see timer.cjs, which itself requires this
+  // module for collectorPath().
+  let timerRemoved = false;
+  try {
+    timerRemoved = require('./timer.cjs').removeTimer();
+  } catch (e) {
+    err(`Could not remove the heartbeat timer: ${e.message}`);
+    hadError = true;
+  }
+  if (timerRemoved) out('Removed the heartbeat timer.');
+
+  if (hadError) {
+    err('ATTRIBUT uninstall finished with errors — see above.');
     return 1;
   }
-
-  // This is the whole-file (no --provider) uninstall — the only path that
-  // drops every agent's token, i.e. a full disconnect. The heartbeat timer is
-  // device-level, not per-agent, so it only comes out here (a per-provider
-  // uninstall leaves other agents, and this timer, connected). Required
-  // lazily — see timer.cjs, which itself requires this module for
-  // collectorPath().
-  const timerRemoved = require('./timer.cjs').removeTimer();
-
-  if (result.removed === 0 && legacyRemoved === 0 && !tokenRemoved && !timerRemoved) {
+  if (totalRemoved === 0 && legacyRemoved === 0 && !tokenRemoved && !timerRemoved) {
     out('No ATTRIBUT hooks found — nothing to do.');
     return 0;
   }
-  if (result.backupPath) out(`  Backed up previous settings → ${result.backupPath}`);
-  if (result.removed > 0) {
-    out(`Removed ${result.removed} ATTRIBUT hook entr${result.removed === 1 ? 'y' : 'ies'} from ${result.settingsPath}`);
-  }
-  if (legacyRemoved > 0) out(`Deleted ${legacyRemoved} legacy collector file(s) from ${legacyHooksDir()}`);
-  if (tokenRemoved) out('Removed stored ingest token.');
-  if (timerRemoved) out('Removed the heartbeat timer.');
-  out('ATTRIBUT capture hook removed.');
+  out('ATTRIBUT capture hook removed (all agents).');
   return 0;
 }
 
