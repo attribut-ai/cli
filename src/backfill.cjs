@@ -49,15 +49,6 @@ function redactHome(msg) {
   return home ? String(msg).split(home).join('~') : String(msg);
 }
 
-// Period choices offered by the interactive backfill picker. `days === 0` means
-// "no cutoff" (full history). 90 days is the default (matches DEFAULT_SINCE).
-const PERIOD_OPTIONS = [
-  { value: 30, label: 'Last 30 days' },
-  { value: 90, label: 'Last 90 days', hint: 'default' },
-  { value: 365, label: 'Last year' },
-  { value: 0, label: 'All history' },
-];
-
 const AGENT_SLUGS = ['claude_code', 'codex', 'agy', 'cursor'];
 const AGENT_LABELS = {
   claude_code: 'Claude Code',
@@ -426,9 +417,11 @@ function finalLine(summary) {
 // interactive entry point — called by `connect` after hooks install
 // ---------------------------------------------------------------------------
 
-// Offer to backfill pre-connect history right after `connect` installs hooks.
-// `connected` is [{ agent, token, endpoint }] (connect.cjs's normalized configs).
-// Silent no-op when not interactive, when there's nothing to backfill, or on any
+// Backfill pre-connect history automatically right after `connect` installs
+// hooks. `connected` is [{ agent, token, endpoint }] (connect.cjs's normalized
+// configs). Runs unattended over a fixed 90-day window — no opt-in prompt, no
+// period picker: it announces itself in one line, then scans and imports. Silent
+// no-op when not interactive, when there's nothing to backfill, or on any
 // internal error — connect's success must never depend on this. `ingestBase`,
 // if given, temporarily overrides INGEST_BASE for the duration of this call.
 async function runBackfillInteractive({ connected, ingestBase } = {}) {
@@ -443,23 +436,16 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
     const prevIngestBase = process.env.INGEST_BASE;
     if (ingestBase) process.env.INGEST_BASE = ingestBase;
     try {
-      // 1) Opt in (default yes). Reassure first: backfill is safe to run — and
-      // re-run — because the server reconciles by session ID.
-      await ui.note(
-        'Re-sends your prior local sessions through the same path as live capture.\n' +
-          'Safe to run — and re-run — anytime: ATTRIBUT deduplicates by session ID on\n' +
-          'the server, so nothing is ever double-counted.',
-        'Backfill'
+      // 1) Announce (no prompt). Backfill now runs automatically over the last
+      // 90 days — one non-blocking line telling the user what's happening and
+      // why it's safe (server dedupes by session ID), then straight into it.
+      await ui.log.info(
+        'Importing your last 90 days of prior local sessions — same path as live ' +
+          'capture, and safe to re-run (deduplicated by session ID).'
       );
-      const go = await ui.confirm('Backfill your prior local sessions to ATTRIBUT?', true);
-      if (!go) return; // false (declined) or null (cancelled) → skip silently
+      const sinceMs = parseSince(DEFAULT_SINCE);
 
-      // 2) Choose the look-back window (default 90 days).
-      const days = await ui.select('How far back should we go?', PERIOD_OPTIONS, 90);
-      if (days === null) return; // cancelled
-      const sinceMs = days === 0 ? null : parseSince(`${days}d`);
-
-      // 3) Gather the docs and show the tally per connector. Scan one connector
+      // 2) Gather the docs and show the tally per connector. Scan one connector
       // at a time, updating the spinner message and yielding between each, so the
       // (synchronous, file/DB-bound) scan can't freeze the UI — the user sees
       // "Scanning Cursor…" etc. rather than a stalled spinner.
@@ -477,7 +463,7 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
       if (result.total === 0) return;
       await ui.note(scanSummaryText(result), 'Sessions to backfill');
 
-      // 4) Upload behind a single progress bar spanning every connector's docs.
+      // 3) Upload behind a single progress bar spanning every connector's docs.
       const bar = await ui.progressBar({ max: result.total });
       bar.start('Backfilling…');
       const { summary, failures } = await uploadAll(result.perAgent, {
@@ -583,11 +569,12 @@ async function runBackfill(argv) {
   }
 
   // Interactive invocation (`attribut backfill` on a TTY without non-interactive
-  // intent) → the polished flow: confirm → period picker → per-connector tally →
-  // progress bar. A period flag (--since/--all) or an explicit non-interactive
-  // flag (--yes/--dry-run) opts into the scripted path below; --agents just scopes
-  // which tools and still gets the polished flow. Tests run non-TTY, so they never
-  // take this branch.
+  // intent) → the automatic flow: announce → per-connector tally → progress bar,
+  // fixed to the last 90 days (same as the post-connect run). To pick a different
+  // window, pass a period flag (--since/--all), which opts into the scripted path
+  // below along with the non-interactive flags (--yes/--dry-run); --agents just
+  // scopes which tools and still gets the automatic flow. Tests run non-TTY, so
+  // they never take this branch.
   const scripted = opts.all || opts.sinceExplicit || opts.yes || opts.dryRun;
   if (!scripted && ui.interactive()) {
     await runBackfillInteractive({ connected: agents.map((a) => ({ agent: a })) });

@@ -4,12 +4,12 @@ Live capture only sees sessions that happen *after* you connect. **Backfill** is
 
 ## Running a backfill
 
-`attribut connect` offers it automatically right after it installs the hooks: it shows how many prior sessions it found and how far back they reach, then lets you pick **Last 90 days** (default), **All history**, or **Skip**.
+`attribut connect` runs it automatically right after it installs the hooks — no prompt. It imports your **last 90 days** of prior sessions, showing how many it found for each tool and a progress bar as it imports. (Scripted, non-interactive connects skip this — run `attribut backfill` yourself there.)
 
 Run it yourself anytime:
 
 ```sh
-attribut backfill              # interactive: confirm, then pick a window
+attribut backfill              # re-import the last 90 days
 attribut backfill --all --yes  # everything still on disk, no prompts
 attribut backfill --since=30d  # a specific window
 ```

@@ -182,12 +182,11 @@ guarantee are identical to a live session (it re-reads the same on-disk
 transcripts/DBs the parsers already know: `~/.claude/projects`, `~/.codex/sessions`,
 Antigravity's per-conversation store, Cursor's `state.vscdb`).
 
-`connect` **offers this automatically** right after it installs hooks (opt-in,
-default yes, interactive terminals only): it shows how many prior sessions it
-found and how far back they go, then lets you pick **last 90 days** (default),
-**all history**, or **skip**. Pass `--no-backfill` to `connect` to suppress the
-offer. Run `attribut backfill` yourself anytime to import a wider/narrower window
-later.
+`connect` **runs this automatically** right after it installs hooks (interactive
+terminals only — scripted/non-TTY connects skip it): it imports your **last 90
+days** of prior sessions with no prompt, showing how many it found per tool and a
+progress bar as it goes. Run `attribut backfill` yourself anytime to re-run it, and
+pass `--since=<N>d` or `--all` to import a wider/narrower window.
 
 **How far back `--all` reaches depends on the tool, not on attribut.** Backfill
 can only send what each tool still keeps on disk, and the tools differ:
