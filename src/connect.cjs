@@ -79,7 +79,6 @@ Options:
   --key=<token>    Non-interactive: the ingest token to pair with.
   --agent=<slug>   Non-interactive: the token's agent (default claude_code).
   --no-browser     Interactive: don't auto-open a browser — just print code+URL.
-  --no-backfill    Skip the post-connect prompt to backfill prior local sessions.
   --app-base=<u>   Override the app origin (default ${DEFAULT_APP_BASE}).
   --endpoint=<u>   Override the ingest origin (default ${DEFAULT_INGEST_BASE}).
   -h, --help       Show this help.
@@ -97,10 +96,6 @@ function parseConnectArgs(argv) {
     noBrowser: false,
     appBase: null,
     endpoint: null,
-    // null = default (offer the interactive backfill prompt on a TTY); false =
-    // --no-backfill (skip it). We never force backfill on a non-TTY here — a
-    // scripted import should call `attribut backfill --yes` explicitly.
-    backfill: null,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -114,8 +109,6 @@ function parseConnectArgs(argv) {
     else if (a === '--agent') r.agent = argv[++i];
     else if (a.startsWith('--agent=')) r.agent = a.slice('--agent='.length);
     else if (a === '--no-browser') r.noBrowser = true;
-    else if (a === '--no-backfill') r.backfill = false;
-    else if (a === '--backfill') r.backfill = true;
     else if (a === '--app-base') r.appBase = argv[++i];
     else if (a.startsWith('--app-base=')) r.appBase = a.slice('--app-base='.length);
     else if (a === '--endpoint') r.endpoint = argv[++i];
@@ -434,15 +427,14 @@ async function runConnect(argv) {
   // look like it failed.
   await ui.log.success(`Connection established for: ${connected.map((c) => c.agent).join(', ')}`);
 
-  // 7) Offer a one-time backfill of pre-connect local history (opt-in, default
-  // yes, TTY only). --no-backfill skips it. Never fatal — the connection already
-  // succeeded, so a backfill hiccup must not fail `connect`.
-  if (opts.backfill !== false) {
-    try {
-      await require('./backfill.cjs').runBackfillInteractive({ connected, ingestBase });
-    } catch (e) {
-      await ui.log.info(`Backfill skipped: ${e.message}`);
-    }
+  // 7) Automatically backfill the last 90 days of pre-connect local history
+  // (TTY only — runBackfillInteractive self-skips on a non-TTY, so scripted
+  // imports are unaffected). Never fatal — the connection already succeeded, so a
+  // backfill hiccup must not fail `connect`.
+  try {
+    await require('./backfill.cjs').runBackfillInteractive({ connected, ingestBase });
+  } catch (e) {
+    await ui.log.info(`Backfill skipped: ${e.message}`);
   }
 
   // Final, unmistakable closer. Whatever backfill did or skipped, the connection
