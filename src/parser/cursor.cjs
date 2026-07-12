@@ -333,7 +333,9 @@ function buildCursorSubagent(db, composerId) {
     lines_added: cd.lines_added,
     lines_removed: cd.lines_removed,
     started_at: isoOrNull(cd.createdAt),
-    ended_at: isoOrNull(cd.lastUpdatedAt),
+    // Same fallback as parseCursorSession: no lastUpdatedAt -> ends at createdAt,
+    // so a subagent keeps a real end time instead of null.
+    ended_at: isoOrNull(cd.lastUpdatedAt != null ? cd.lastUpdatedAt : cd.createdAt),
     duration_ms:
       cd.createdAt && cd.lastUpdatedAt && cd.lastUpdatedAt >= cd.createdAt
         ? cd.lastUpdatedAt - cd.createdAt
@@ -386,7 +388,14 @@ function parseCursorSession(extra = {}) {
   const numToolCalls = tools.tool_uses.reduce((a, t) => a + t.count, 0);
 
   const startedAt = cd ? isoOrNull(cd.createdAt) : null;
-  const endedAt = cd ? isoOrNull(cd.lastUpdatedAt) : null;
+  // ended_at falls back to createdAt when lastUpdatedAt is absent. ~45% of Cursor
+  // composers carry createdAt but no lastUpdatedAt (a session with no post-create
+  // update); deriving ended_at ONLY from lastUpdatedAt left it null for those, and
+  // the collector then stamped `new Date()` — mis-dating historical sessions
+  // (esp. during backfill) to the run time. A session with a known start but no
+  // recorded update ends when it started (zero observed duration), which is
+  // correct and keeps it on its real calendar day.
+  const endedAt = cd ? isoOrNull(cd.lastUpdatedAt != null ? cd.lastUpdatedAt : cd.createdAt) : null;
   const durationMs =
     cd && cd.createdAt && cd.lastUpdatedAt && cd.lastUpdatedAt >= cd.createdAt
       ? cd.lastUpdatedAt - cd.createdAt
