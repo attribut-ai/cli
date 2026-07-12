@@ -433,8 +433,8 @@ test('failureSummary: a non-ENOENT cause reads as "could not be read locally"', 
 // uploadAll — phased (preprocess → transmit); failures collected, not thrown
 // =============================================================================
 
-test('uploadAll: a build failure is collected (not thrown), counted, and still ticks progress', async () => {
-  // A claude_code descriptor pointing at a nonexistent transcript: the PREPROCESS
+test('uploadAll: a build failure is collected (not thrown), counted, and still ticks both phases', async () => {
+  // A claude_code descriptor pointing at a nonexistent transcript: the PREPARE
   // phase build throws, so it never reaches transmit — no network needed.
   const perAgent = [{ agent: 'claude_code', descriptors: [{ path: '/nonexistent/nope.jsonl', whenMs: 0 }] }];
   const ticks = [];
@@ -446,25 +446,30 @@ test('uploadAll: a build failure is collected (not thrown), counted, and still t
   assert.equal(summary[0].failed, 1);
   assert.equal(failures.length, 1);
   assert.equal(failures[0].agent, 'claude_code');
-  assert.equal(ticks.length, 1); // progress advances once even for a skipped session
-  assert.deepEqual(ticks[0], { agent: 'claude_code', done: 1, total: 1 });
+  // A build failure spends BOTH its ticks up front (it can never transmit) so the
+  // 2-per-session count stays exact and a 2×total bar still fills.
+  assert.equal(ticks.length, 2);
+  assert.deepEqual(ticks[0], { agent: 'claude_code', phase: 'prepare', done: 1, total: 1 });
+  assert.deepEqual(ticks[1], { agent: 'claude_code', phase: 'transmit', done: 1, total: 1 });
 });
 
-test('uploadAll --dry-run: collects built envelopes, POSTs nothing, ticks once per session', async () => {
+test('uploadAll --dry-run: collects built envelopes, POSTs nothing, ticks twice per session', async () => {
   const prevSessDir = process.env.CODEX_SESSIONS_DIR;
   process.env.CODEX_SESSIONS_DIR = CODEX_FIX_DIR;
   try {
     const result = scan(['codex'], { sinceMs: null });
     assert.ok(result.total >= 1);
-    let ticks = 0;
+    const phases = { prepare: 0, transmit: 0 };
     const { summary, envelopes, failures } = await uploadAll(result.perAgent, {
       dryRun: true,
-      onProgress: () => (ticks += 1),
+      onProgress: ({ phase }) => (phases[phase] += 1),
     });
     assert.equal(failures.length, 0);
     assert.equal(envelopes.length, result.total); // one built envelope per session
     assert.equal(summary[0].sent, result.total);
-    assert.equal(ticks, result.total);
+    // Two ticks per session: one prepare, one transmit — a 2×total bar fills.
+    assert.equal(phases.prepare, result.total);
+    assert.equal(phases.transmit, result.total);
     assert.ok(envelopes[0].envelope && envelopes[0].agent === 'codex');
   } finally {
     if (prevSessDir === undefined) delete process.env.CODEX_SESSIONS_DIR;
