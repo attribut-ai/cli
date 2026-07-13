@@ -516,6 +516,41 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
   }
 }
 
+// Non-interactive backfill for the `connect --key --backfill` path. Unlike
+// runBackfillInteractive it does NOT require a TTY and prints plain lines instead
+// of spinners/progress bars, so it works in a scripted cloud Setup step. It only
+// runs when the caller explicitly opts in (connect --backfill), so the
+// ephemeral-reboot re-import concern is a deliberate choice, not a default.
+// Mirrors the interactive path's INGEST_BASE handling (so --endpoint overrides
+// reach the upload) and its token model (collector.postEnvelope reads the
+// just-installed on-disk token). Never throws for an empty scan; a transport
+// failure surfaces via the returned failure summary, not an exception.
+async function runBackfillHeadless({ agents, ingestBase, sinceMs = parseSince(DEFAULT_SINCE) } = {}) {
+  const agentSlugs = (agents || []).filter((a) => AGENT_SLUGS.includes(a));
+  if (agentSlugs.length === 0) return;
+
+  const prevIngestBase = process.env.INGEST_BASE;
+  if (ingestBase) process.env.INGEST_BASE = ingestBase;
+  try {
+    const { perAgent, total } = scan(agentSlugs, { sinceMs });
+    if (total === 0) {
+      out('  No prior local sessions to import.');
+      return;
+    }
+    out(`  Importing your last 90 days — ${total} prior session${total === 1 ? '' : 's'} (safe to re-run; deduplicated by session ID)…`);
+    const { summary, failures } = await uploadAll(perAgent, {});
+    const sent = summary.reduce((n, s) => n + s.sent, 0);
+    out(`  ✓ Imported ${sent}/${total} session${total === 1 ? '' : 's'}.`);
+    const skipped = failureSummary(failures);
+    if (skipped) out(`  ${skipped}`);
+  } finally {
+    if (ingestBase) {
+      if (prevIngestBase === undefined) delete process.env.INGEST_BASE;
+      else process.env.INGEST_BASE = prevIngestBase;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // standalone command — `attribut backfill`
 // ---------------------------------------------------------------------------
@@ -677,6 +712,7 @@ async function runBackfill(argv) {
 module.exports = {
   runBackfill,
   runBackfillInteractive,
+  runBackfillHeadless,
   scan,
   enumerate,
   parseSince,

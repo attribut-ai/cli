@@ -78,6 +78,10 @@ Options:
                    Installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.
   --key=<token>    Non-interactive: the ingest token to pair with.
   --agent=<slug>   Non-interactive: the token's agent (default claude_code).
+  --backfill       Non-interactive: also import the last 90 days of local
+                   history after pairing. Default OFF for --key — so an
+                   ephemeral cloud env doesn't re-import on every boot.
+  --no-backfill    Interactive: skip the automatic 90-day history import.
   --no-browser     Interactive: don't auto-open a browser — just print code+URL.
   --app-base=<u>   Override the app origin (default ${DEFAULT_APP_BASE}).
   --endpoint=<u>   Override the ingest origin (default ${DEFAULT_INGEST_BASE}).
@@ -94,6 +98,9 @@ function parseConnectArgs(argv) {
     key: null,
     agent: null,
     noBrowser: false,
+    // Tri-state: null = use the path default (interactive imports, --key does
+    // not), true = force the 90-day history import, false = skip it.
+    backfill: null,
     appBase: null,
     endpoint: null,
     help: false,
@@ -109,6 +116,8 @@ function parseConnectArgs(argv) {
     else if (a === '--agent') r.agent = argv[++i];
     else if (a.startsWith('--agent=')) r.agent = a.slice('--agent='.length);
     else if (a === '--no-browser') r.noBrowser = true;
+    else if (a === '--backfill') r.backfill = true;
+    else if (a === '--no-backfill') r.backfill = false;
     else if (a === '--app-base') r.appBase = argv[++i];
     else if (a.startsWith('--app-base=')) r.appBase = a.slice('--app-base='.length);
     else if (a === '--endpoint') r.endpoint = argv[++i];
@@ -429,12 +438,16 @@ async function runConnect(argv) {
 
   // 7) Automatically backfill the last 90 days of pre-connect local history
   // (TTY only — runBackfillInteractive self-skips on a non-TTY, so scripted
-  // imports are unaffected). Never fatal — the connection already succeeded, so a
-  // backfill hiccup must not fail `connect`.
-  try {
-    await require('./backfill.cjs').runBackfillInteractive({ connected, ingestBase });
-  } catch (e) {
-    await ui.log.info(`Backfill skipped: ${e.message}`);
+  // imports are unaffected). Opt OUT with --no-backfill. Never fatal — the
+  // connection already succeeded, so a backfill hiccup must not fail `connect`.
+  if (opts.backfill === false) {
+    await ui.log.info('Skipping the 90-day history import (--no-backfill).');
+  } else {
+    try {
+      await require('./backfill.cjs').runBackfillInteractive({ connected, ingestBase });
+    } catch (e) {
+      await ui.log.info(`Backfill skipped: ${e.message}`);
+    }
   }
 
   // Final, unmistakable closer. Whatever backfill did or skipped, the connection
@@ -476,6 +489,21 @@ async function runTokenConnect(opts) {
   });
   timer.installTimer();
   out(`✓ Connection established for: ${agent}`);
+
+  // Opt-in history import. OFF by default on the --key path: this is the
+  // cloud/scripted route, where a fresh ephemeral env usually has no local
+  // history and an unconditional import would re-scan + re-POST 90 days on every
+  // boot (safe — the server dedupes by sessionId — but wasteful). `--backfill`
+  // turns it on for the one-time case (onboarding on a real dev machine). Uses
+  // the headless path since --key environments are typically non-TTY. Never
+  // fatal — pairing already succeeded.
+  if (opts.backfill === true) {
+    try {
+      await require('./backfill.cjs').runBackfillHeadless({ agents: [agent], ingestBase });
+    } catch (e) {
+      out(`  (backfill skipped: ${e.message})`);
+    }
+  }
   return 0;
 }
 
