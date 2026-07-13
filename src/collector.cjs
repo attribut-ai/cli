@@ -687,15 +687,17 @@ Commands:
   connect      Connect this device via the browser (device flow): pick which
                tools to capture, approve in a browser, hooks install themselves.
                  attribut connect [--agents=claude_code,agy] [--no-browser]
-  install      Register the capture hook in ~/.claude/settings.json (manual token)
-                 attribut install --key=<token> [--endpoint=<origin>]
-  uninstall    Remove the capture hook (and any legacy collector files)
+  install      Register the capture hook (Claude Code by default; --provider for others)
+                 attribut install --key=<token> [--endpoint=<origin>] [--provider <agent>]
+  uninstall    Remove capture hooks. No flag = full disconnect (every agent, token,
+               timer); --provider <agent> scopes to one agent.
+                 attribut uninstall [--provider anthropic|openai|cursor|antigravity]
   heartbeat    Send a one-off liveness signal (installed hourly by connect)
                  attribut heartbeat [--dry-run]
   audit        Prove metadata-only on your own data: validate every payload
                against the frozen contract and scan it for content leaks.
-                 attribut audit                 sweep ALL local sessions (summary)
-                 attribut audit <transcript>    full payload for one session
+                 attribut audit                 sweep all local Claude Code sessions (summary)
+                 attribut audit <transcript>    full payload for one Claude Code session
   backfill     Send your EXISTING local sessions (pre-connect history) to ATTRIBUT.
                  attribut backfill [--agents=a,b] [--since=90d|<ISO>] [--all]
                                    [--yes] [--dry-run]
@@ -768,10 +770,25 @@ async function main() {
       log('--parse requires a file path argument.');
       return 2; // explicit user CLI misuse → fail loud
     }
-    const payload =
-      provider === 'openai'
-        ? codexParser.parseCodexRollout(file, { device_uuid: getOrCreateDeviceUuid() })
-        : parser.parseClaudeCodeTranscript(file, { device_uuid: getOrCreateDeviceUuid() });
+    const extra = { device_uuid: getOrCreateDeviceUuid() };
+    // Dispatch to the parser matching --provider. Never fall through to the
+    // Claude parser for a non-Claude file — that silently mis-parses. Cursor
+    // sessions live in state.vscdb (keyed by composerId), not a standalone
+    // transcript file, so a file-based --parse can't serve it: fail loud.
+    let payload;
+    if (provider === 'openai') {
+      payload = codexParser.parseCodexRollout(file, extra);
+    } else if (provider === 'antigravity') {
+      payload = agyParser.parseAntigravityTranscript(file, extra);
+    } else if (provider === 'cursor') {
+      log('--parse is not supported for --provider cursor (Cursor sessions live in state.vscdb, not a transcript file).');
+      return 2;
+    } else if (provider === 'anthropic') {
+      payload = parser.parseClaudeCodeTranscript(file, extra);
+    } else {
+      log(`--parse: unknown --provider "${provider}".`);
+      return 2;
+    }
     process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
     return 0;
   }

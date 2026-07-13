@@ -263,10 +263,12 @@ function defaultConcurrency() {
 //     network-bound, rate-limited phase.
 //
 // Separating them keeps a heavy preprocess (e.g. a big Cursor DB) from starving
-// the network pipe and vice-versa. onProgress fires once per session (build-skip
-// or transmit) with the provider's cumulative done/total. Failures are counted +
-// collected (never re-thrown, never printed inline — the caller summarizes them
-// after the bar). dryRun collects built envelopes instead of POSTing.
+// the network pipe and vice-versa. onProgress fires TWICE per session — once in
+// PREPROCESS (phase:'prepare') and once in TRANSMIT (phase:'transmit'), each with
+// the provider's cumulative done/total for that phase — so a bar sized to 2×total
+// fills across both. Failures are counted + collected (never re-thrown, never
+// printed inline — the caller summarizes them after the bar). dryRun collects
+// built envelopes instead of POSTing.
 async function uploadAll(perAgent, { concurrency = defaultConcurrency(), dryRun = false, onProgress } = {}) {
   const summary = [];
   const envelopes = [];
@@ -299,43 +301,66 @@ async function uploadAll(perAgent, { concurrency = defaultConcurrency(), dryRun 
   return { summary, envelopes, failures };
 }
 
-// Backfill one provider: PREPROCESS (build every envelope, unthrottled) then
-// TRANSMIT (POST at `concurrency`, or collect for dry-run). Pushes any build/POST
-// failures into `failures` and dry-run envelopes into `envelopes`. Returns this
-// provider's { agent, total, sent, failed } summary. onProgress ticks once per
-// session (build-skip or transmit) so counts always reach `total`.
+// Number of PREPROCESS builds between event-loop yields. The build phase is
+// synchronous and IO-heavy (full transcript reads, SQLite, JSON parse); without a
+// periodic yield it blocks the single Node thread for the whole phase, freezing
+// the progress bar's paint. Yielding every N keeps the UI live at negligible cost.
+const PREPARE_YIELD_EVERY = 20;
+
+// Backfill one provider in two visible phases so the progress bar never stalls:
+//
+//   PREPARE  — build every envelope (unthrottled CPU/IO). Emits an onProgress
+//              tick per session with phase:'prepare', and yields to the event loop
+//              every PREPARE_YIELD_EVERY builds so the bar actually repaints
+//              instead of freezing until the phase ends.
+//   TRANSMIT — POST the built envelopes at `concurrency` (or collect for dry-run).
+//              Emits a tick per session with phase:'transmit'.
+//
+// Each session contributes EXACTLY TWO ticks total (one prepare, one transmit), so
+// a caller sizing its bar to 2×total fills smoothly across both phases. A build
+// failure is the one asymmetry: it can never transmit, so its transmit tick is
+// emitted immediately alongside its prepare tick — keeping the 2-per-session count
+// exact. Build/POST failures are counted + collected into `failures`, never thrown.
+// Holds all of this provider's built envelopes in memory (~2KB each) — fine at
+// realistic session counts; a multi-year `--all` on a heavy user is the only case
+// that could grow large.
 async function uploadProvider(entry, { concurrency, dryRun, onProgress, agents, envelopes, failures }) {
   const { agent, descriptors } = entry;
   const total = descriptors.length;
   const build = builderFor(agent);
+  let prepared = 0;
   let done = 0;
   let sent = 0;
   let failed = 0;
-  const tick = () => {
+  const tickPrepare = () => {
+    prepared += 1;
+    if (onProgress) onProgress({ agent, phase: 'prepare', done: prepared, total });
+  };
+  const tickTransmit = () => {
     done += 1;
-    if (onProgress) onProgress({ agent, done, total });
+    if (onProgress) onProgress({ agent, phase: 'transmit', done, total });
   };
 
-  // PHASE 2 — PREPROCESS (unthrottled). A build failure is counted + collected
-  // here and never reaches the transmit phase. Holds all of this provider's built
-  // envelopes in memory (~2KB each) — fine at realistic session counts; a
-  // multi-year `--all` on a heavy user is the only case that could grow large.
+  // PHASE 2 — PREPARE (unthrottled, but yields periodically so the bar repaints).
   const ready = [];
-  for (const d of descriptors) {
+  for (let i = 0; i < descriptors.length; i++) {
     try {
-      ready.push(build(syntheticHook(agent, d), { trigger: 'backfill', source: 'cli' }));
+      ready.push(build(syntheticHook(agent, descriptors[i]), { trigger: 'backfill', source: 'cli' }));
+      tickPrepare();
     } catch (e) {
       failed += 1;
       failures.push({ agent, message: e.message });
-      tick(); // a skipped session is "done" for progress
+      tickPrepare();
+      tickTransmit(); // never reaches transmit — spend its transmit tick now
     }
+    if ((i + 1) % PREPARE_YIELD_EVERY === 0) await new Promise((r) => setImmediate(r));
   }
 
   if (dryRun) {
     for (const envelope of ready) {
       envelopes.push({ agent, envelope });
       sent += 1;
-      tick();
+      tickTransmit();
     }
     return { agent, total, sent, failed };
   }
@@ -349,7 +374,7 @@ async function uploadProvider(entry, { concurrency, dryRun, onProgress, agents, 
       failed += 1;
       failures.push({ agent, message: e.message });
     } finally {
-      tick();
+      tickTransmit();
     }
   });
 
@@ -464,13 +489,17 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
       await ui.note(scanSummaryText(result), 'Sessions to backfill');
 
       // 3) Upload behind a single progress bar spanning every connector's docs.
-      const bar = await ui.progressBar({ max: result.total });
-      bar.start('Backfilling…');
+      // Each session ticks twice (prepare + transmit), so the bar is sized to
+      // 2×total and the label names the current phase — otherwise the bar would
+      // sit frozen at 0 through the (synchronous, IO-heavy) prepare phase.
+      const bar = await ui.progressBar({ max: result.total * 2 });
+      bar.start('Preparing sessions…');
       const { summary, failures } = await uploadAll(result.perAgent, {
-        // Label shows the CURRENT connector's own progress (agentDone/agentTotal);
-        // the bar itself fills over the global total. Advancing by 1 per session.
-        onProgress: ({ agent, done: agentDone, total: agentTotal }) => {
-          bar.advance(1, `${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
+        // Label shows the CURRENT connector's own progress (agentDone/agentTotal)
+        // and phase; the bar itself fills over the global 2×total. +1 per tick.
+        onProgress: ({ agent, phase, done: agentDone, total: agentTotal }) => {
+          const verb = phase === 'prepare' ? 'Preparing' : 'Importing';
+          bar.advance(1, `${verb} ${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
         },
       });
       bar.stop(finalLine(summary));
@@ -484,6 +513,41 @@ async function runBackfillInteractive({ connected, ingestBase } = {}) {
     }
   } catch (e) {
     err(`  (backfill: skipped due to error: ${redactHome(e.message)})`);
+  }
+}
+
+// Non-interactive backfill for the `connect --key --backfill` path. Unlike
+// runBackfillInteractive it does NOT require a TTY and prints plain lines instead
+// of spinners/progress bars, so it works in a scripted cloud Setup step. It only
+// runs when the caller explicitly opts in (connect --backfill), so the
+// ephemeral-reboot re-import concern is a deliberate choice, not a default.
+// Mirrors the interactive path's INGEST_BASE handling (so --endpoint overrides
+// reach the upload) and its token model (collector.postEnvelope reads the
+// just-installed on-disk token). Never throws for an empty scan; a transport
+// failure surfaces via the returned failure summary, not an exception.
+async function runBackfillHeadless({ agents, ingestBase, sinceMs = parseSince(DEFAULT_SINCE) } = {}) {
+  const agentSlugs = (agents || []).filter((a) => AGENT_SLUGS.includes(a));
+  if (agentSlugs.length === 0) return;
+
+  const prevIngestBase = process.env.INGEST_BASE;
+  if (ingestBase) process.env.INGEST_BASE = ingestBase;
+  try {
+    const { perAgent, total } = scan(agentSlugs, { sinceMs });
+    if (total === 0) {
+      out('  No prior local sessions to import.');
+      return;
+    }
+    out(`  Importing your last 90 days — ${total} prior session${total === 1 ? '' : 's'} (safe to re-run; deduplicated by session ID)…`);
+    const { summary, failures } = await uploadAll(perAgent, {});
+    const sent = summary.reduce((n, s) => n + s.sent, 0);
+    out(`  ✓ Imported ${sent}/${total} session${total === 1 ? '' : 's'}.`);
+    const skipped = failureSummary(failures);
+    if (skipped) out(`  ${skipped}`);
+  } finally {
+    if (ingestBase) {
+      if (prevIngestBase === undefined) delete process.env.INGEST_BASE;
+      else process.env.INGEST_BASE = prevIngestBase;
+    }
   }
 }
 
@@ -629,11 +693,14 @@ async function runBackfill(argv) {
     }
   }
 
-  const bar = await ui.progressBar({ max: result.total });
-  bar.start('Backfilling…');
+  // Each session ticks twice (prepare + transmit) — bar sized to 2×total, label
+  // names the phase, so the (synchronous) prepare phase shows movement too.
+  const bar = await ui.progressBar({ max: result.total * 2 });
+  bar.start('Preparing sessions…');
   const { summary, failures } = await uploadAll(result.perAgent, {
-    onProgress: ({ agent, done: agentDone, total: agentTotal }) => {
-      bar.advance(1, `${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
+    onProgress: ({ agent, phase, done: agentDone, total: agentTotal }) => {
+      const verb = phase === 'prepare' ? 'Preparing' : 'Importing';
+      bar.advance(1, `${verb} ${AGENT_LABELS[agent] || agent} — ${agentDone}/${agentTotal}`);
     },
   });
   bar.stop(finalLine(summary));
@@ -645,6 +712,7 @@ async function runBackfill(argv) {
 module.exports = {
   runBackfill,
   runBackfillInteractive,
+  runBackfillHeadless,
   scan,
   enumerate,
   parseSince,

@@ -91,7 +91,46 @@ test('parses model, cost, context, tokens, LOC, turns, tools from a full session
     assert.strictEqual(p.tokens_out, null);
     assert.strictEqual(p.lines_code_added, null);
     assert.strictEqual(p.started_at, new Date(1762653135831).toISOString());
+    assert.strictEqual(p.ended_at, new Date(1762656899770).toISOString()); // lastUpdatedAt
     assert.strictEqual(p.duration_ms, 1762656899770 - 1762653135831);
+  });
+});
+
+test('ended_at falls back to createdAt when lastUpdatedAt is absent (never null → no now-stamp)', () => {
+  // ~45% of real Cursor composers carry createdAt but no lastUpdatedAt. Deriving
+  // ended_at ONLY from lastUpdatedAt left it null, and the collector then stamped
+  // `new Date()` — mis-dating historical/backfilled sessions to the run time. The
+  // parser must instead end the session at createdAt (zero observed duration).
+  const fx = buildCursorFixture(baseSpec({ lastUpdatedAt: null }));
+  withDb(fx, () => {
+    const p = cursor.parseCursorSession({ composerId: CID, transcriptPath: fx.transcriptPath });
+    assert.strictEqual(p.started_at, new Date(1762653135831).toISOString());
+    assert.strictEqual(p.ended_at, new Date(1762653135831).toISOString()); // == createdAt, not "now"
+    assert.strictEqual(p.duration_ms, null); // unknown duration without an update ts
+  });
+});
+
+test('subagent ended_at also falls back to createdAt when lastUpdatedAt is absent', () => {
+  const spec = baseSpec({
+    subagents: [
+      {
+        composerId: 'sub-aaaa',
+        model: 'composer-2.5',
+        usageData: {},
+        contextTokensUsed: 8000,
+        createdAt: 1762653135831,
+        lastUpdatedAt: null,
+        bubbles: [{ type: 2, inputTokens: 3000, outputTokens: 400 }],
+      },
+    ],
+  });
+  const fx = buildCursorFixture(spec);
+  withDb(fx, () => {
+    const p = cursor.parseCursorSession({ composerId: CID, transcriptPath: fx.transcriptPath });
+    const sub = p.cursor.subagents[0];
+    assert.ok(sub, 'expected one subagent');
+    assert.strictEqual(sub.started_at, new Date(1762653135831).toISOString());
+    assert.strictEqual(sub.ended_at, new Date(1762653135831).toISOString()); // == createdAt, not null
   });
 });
 

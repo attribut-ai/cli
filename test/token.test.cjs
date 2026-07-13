@@ -67,3 +67,15 @@ test('removeToken(agent) drops one entry; file removed once empty', () => {
   assert.equal(tokenStore.removeToken('agy'), true); // last one
   assert.equal(tokenStore.readToken(), ''); // file removed
 });
+
+test('removeToken(agent) leaves a BARE (shared) token untouched', () => {
+  tokenStore.removeToken();
+  tokenStore.writeToken('shared-bare'); // no agent → bare token
+  // A scoped removal cannot attribute a shared token to one agent, so it is a
+  // no-op — the token must survive for whichever agents still use it.
+  assert.equal(tokenStore.removeToken('codex'), false);
+  assert.equal(tokenStore.readToken(), 'shared-bare');
+  // The unscoped removal still drops it entirely.
+  assert.equal(tokenStore.removeToken(), true);
+  assert.equal(tokenStore.readToken(), '');
+});

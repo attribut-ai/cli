@@ -8,6 +8,7 @@ const path = require('path');
 
 const settings = require('../src/settings.cjs');
 const install = require('../src/install.cjs');
+const tokenStore = require('../src/token.cjs');
 
 const COLLECTOR = install.collectorPath();
 
@@ -26,6 +27,74 @@ function ourEntries(arr) {
 function tmpSettings() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-settings-'));
   return path.join(dir, 'settings.json');
+}
+
+/**
+ * A no-provider `uninstall` is now a full disconnect that sweeps EVERY agent, so
+ * it reads Codex/Cursor/Antigravity config too. Point those at fresh, empty tmp
+ * files so the sweep stays sandboxed and never touches the dev machine's real
+ * ~/.codex, ~/.cursor, or ~/.gemini. Returns a restore fn for the finally block.
+ */
+function sandboxOtherAgents() {
+  const files = {
+    CODEX_CONFIG_PATH: 'config.toml',
+    CURSOR_HOOKS_PATH: 'hooks.json',
+    AGY_HOOKS_PATH: 'agy-hooks.json',
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-agents-'));
+  const prev = {};
+  for (const k of Object.keys(files)) {
+    prev[k] = process.env[k];
+    process.env[k] = path.join(dir, files[k]);
+  }
+  return () => {
+    for (const k of Object.keys(files)) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  };
+}
+
+/**
+ * Run `fn(dir)` with every agent's config path, the token/config/legacy dirs, and
+ * the timer dirs pointed into one fresh tmp dir (timer activation skipped). Used
+ * by the multi-agent uninstall tests so installing/removing all four agents never
+ * escapes the sandbox. Restores all touched env vars afterwards.
+ */
+function withSandbox(fn) {
+  const keys = [
+    'CLAUDE_SETTINGS_PATH',
+    'CODEX_CONFIG_PATH',
+    'CURSOR_HOOKS_PATH',
+    'AGY_HOOKS_PATH',
+    'ATTRIBUT_CONFIG_DIR',
+    'ATTRIBUT_HOOKS_DIR',
+    'ATTRIBUT_LAUNCHD_DIR',
+    'ATTRIBUT_SYSTEMD_USER_DIR',
+    'ATTRIBUT_SKIP_TIMER_ACTIVATION',
+  ];
+  const prev = {};
+  for (const k of keys) prev[k] = process.env[k];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-all-'));
+  const configDir = path.join(dir, 'config');
+  fs.mkdirSync(configDir, { recursive: true });
+  process.env.CLAUDE_SETTINGS_PATH = path.join(dir, 'claude-settings.json');
+  process.env.CODEX_CONFIG_PATH = path.join(dir, 'codex-config.toml');
+  process.env.CURSOR_HOOKS_PATH = path.join(dir, 'cursor-hooks.json');
+  process.env.AGY_HOOKS_PATH = path.join(dir, 'agy-hooks.json');
+  process.env.ATTRIBUT_CONFIG_DIR = configDir;
+  process.env.ATTRIBUT_HOOKS_DIR = path.join(dir, 'claude-hooks');
+  process.env.ATTRIBUT_LAUNCHD_DIR = path.join(dir, 'launchd');
+  process.env.ATTRIBUT_SYSTEMD_USER_DIR = path.join(dir, 'systemd');
+  process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
+  try {
+    return fn(dir);
+  } finally {
+    for (const k of keys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
 }
 
 test('buildHookCommand never embeds the token', () => {
@@ -235,6 +304,7 @@ test('install then uninstall round-trips on disk, preserving other settings', ()
   process.env.ATTRIBUT_LAUNCHD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-launchd-'));
   process.env.ATTRIBUT_SYSTEMD_USER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-systemd-'));
   process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
+  const restoreAgents = sandboxOtherAgents();
   const tokenFile = path.join(process.env.ATTRIBUT_CONFIG_DIR, 'token');
   try {
     assert.equal(install.runInstall(['--key=tok-xyz']), 0);
@@ -257,6 +327,7 @@ test('install then uninstall round-trips on disk, preserving other settings', ()
     // Uninstall dropped the token file.
     assert.ok(!fs.existsSync(tokenFile));
   } finally {
+    restoreAgents();
     if (prevEnv === undefined) delete process.env.CLAUDE_SETTINGS_PATH;
     else process.env.CLAUDE_SETTINGS_PATH = prevEnv;
     if (prevHooks === undefined) delete process.env.ATTRIBUT_HOOKS_DIR;
@@ -291,6 +362,7 @@ test('uninstall removes legacy copied collector files', () => {
   process.env.ATTRIBUT_LAUNCHD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-launchd-'));
   process.env.ATTRIBUT_SYSTEMD_USER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-systemd-'));
   process.env.ATTRIBUT_SKIP_TIMER_ACTIVATION = '1';
+  const restoreAgents = sandboxOtherAgents();
   try {
     assert.equal(install.runUninstall([]), 0);
     assert.ok(!fs.existsSync(path.join(hooksDir, 'attribut-collector.cjs')));
@@ -298,6 +370,7 @@ test('uninstall removes legacy copied collector files', () => {
     // dir was emptied → pruned
     assert.ok(!fs.existsSync(hooksDir));
   } finally {
+    restoreAgents();
     if (prevEnv === undefined) delete process.env.CLAUDE_SETTINGS_PATH;
     else process.env.CLAUDE_SETTINGS_PATH = prevEnv;
     if (prevHooks === undefined) delete process.env.ATTRIBUT_HOOKS_DIR;
@@ -317,4 +390,75 @@ test('readSettings throws on malformed JSON (never clobbers)', () => {
   const p = tmpSettings();
   fs.writeFileSync(p, '{ not json', 'utf8');
   assert.throws(() => settings.readSettings(p), /not valid JSON/);
+});
+
+test('uninstall (no --provider) fully disconnects EVERY agent, not just Claude', () => {
+  withSandbox((dir) => {
+    // Connect all four agents.
+    assert.equal(install.runInstall(['--provider', 'anthropic', '--key=tok-a']), 0);
+    assert.equal(install.runInstall(['--provider', 'openai', '--key=tok-o']), 0);
+    assert.equal(install.runInstall(['--provider', 'cursor', '--key=tok-c']), 0);
+    assert.equal(install.runInstall(['--provider', 'antigravity', '--key=tok-g']), 0);
+
+    const files = [
+      process.env.CLAUDE_SETTINGS_PATH,
+      process.env.CODEX_CONFIG_PATH,
+      process.env.CURSOR_HOOKS_PATH,
+      process.env.AGY_HOOKS_PATH,
+    ];
+    for (const f of files) {
+      assert.match(fs.readFileSync(f, 'utf8'), /collector\.cjs/, `${f} has our hook before uninstall`);
+    }
+    const tokenFile = path.join(process.env.ATTRIBUT_CONFIG_DIR, 'token');
+    assert.ok(fs.existsSync(tokenFile), 'token store exists before uninstall');
+
+    // The plain, no-flag uninstall must remove ALL of them.
+    assert.equal(install.runUninstall([]), 0);
+
+    for (const f of files) {
+      assert.ok(
+        !fs.readFileSync(f, 'utf8').includes('collector.cjs'),
+        `${f} must have NO orphaned ATTRIBUT hook after full uninstall`
+      );
+    }
+    assert.ok(!fs.existsSync(tokenFile), 'token store dropped on full uninstall');
+  });
+});
+
+test('uninstall --provider openai scopes to Codex, leaving Claude + shared token intact', () => {
+  withSandbox(() => {
+    // Manual `install` writes a single shared (bare) token, so a scoped uninstall
+    // must remove only Codex's hook and leave the shared token for Claude.
+    assert.equal(install.runInstall(['--provider', 'anthropic', '--key=tok-a']), 0);
+    assert.equal(install.runInstall(['--provider', 'openai', '--key=tok-shared']), 0);
+
+    assert.equal(install.runUninstall(['--provider', 'openai']), 0);
+
+    // Codex hook gone…
+    assert.ok(!fs.readFileSync(process.env.CODEX_CONFIG_PATH, 'utf8').includes('collector.cjs'));
+    // …but Claude's hook stays, and the shared token is NOT yanked out from under it.
+    assert.match(fs.readFileSync(process.env.CLAUDE_SETTINGS_PATH, 'utf8'), /collector\.cjs/);
+    assert.ok(
+      fs.existsSync(path.join(process.env.ATTRIBUT_CONFIG_DIR, 'token')),
+      'shared token preserved for the still-connected Claude agent'
+    );
+  });
+});
+
+test('uninstall --provider revokes only that agent entry in a per-agent token map', () => {
+  withSandbox(() => {
+    // The `connect` flow stores a per-agent map — a scoped uninstall drops just
+    // that agent's entry and keeps the rest.
+    tokenStore.writeToken('cc', 'claude_code');
+    tokenStore.writeToken('oo', 'codex');
+    install.runInstall(['--provider', 'openai', '--key=oo']); // bake Codex's hook to remove
+    // Re-establish the map (runInstall's bare write clobbered it).
+    tokenStore.writeToken('cc', 'claude_code');
+    tokenStore.writeToken('oo', 'codex');
+
+    assert.equal(install.runUninstall(['--provider', 'openai']), 0);
+
+    assert.equal(tokenStore.readToken('codex'), '', 'Codex token revoked');
+    assert.equal(tokenStore.readToken('claude_code'), 'cc', 'Claude token kept');
+  });
 });
