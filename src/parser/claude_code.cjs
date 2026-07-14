@@ -455,6 +455,19 @@ function buildClaudeSubagents(transcriptPath, sessionId) {
         ended_at: p.ended_at,
         duration_ms: p.duration_ms,
         tool_uses: p.tool_uses || [],
+        // Structural line-count breakdown (counts only; content never retained).
+        // `p` already carries the 9 contract keys spread onto its payload by the
+        // inner parseClaudeCodeTranscript call above — copy them onto this
+        // subagent record so per-subagent VALUE is computable downstream.
+        lines_code_added: p.lines_code_added || 0,
+        lines_comment_added: p.lines_comment_added || 0,
+        lines_blank_added: p.lines_blank_added || 0,
+        lines_code_removed: p.lines_code_removed || 0,
+        lines_comment_removed: p.lines_comment_removed || 0,
+        lines_blank_removed: p.lines_blank_removed || 0,
+        added_char_n: p.added_char_n || 0,
+        added_char_sum: p.added_char_sum || 0,
+        added_char_sumsq: p.added_char_sumsq || 0,
         // Worker workers commit in their own (often worktree-isolated) checkout;
         // those SHAs/branch are NEVER observed in the parent transcript. Keep them
         // on the subagent record so the session-level union below can recover them.
