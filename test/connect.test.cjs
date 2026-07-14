@@ -19,6 +19,7 @@ process.env.ATTRIBUT_CONFIG_DIR = path.join(TMP, 'config');
 process.env.CLAUDE_SETTINGS_PATH = path.join(TMP, 'claude', 'settings.json');
 process.env.AGY_HOOKS_PATH = path.join(TMP, 'gemini', 'hooks.json');
 process.env.CODEX_CONFIG_PATH = path.join(TMP, 'codex', 'config.toml');
+process.env.CURSOR_HOOKS_PATH = path.join(TMP, 'cursor', 'hooks.json');
 process.env.ATTRIBUT_ALLOW_INSECURE = '1'; // permit the localhost http server
 process.env.ATTRIBUT_NO_BROWSER = '1'; // never spawn a browser in tests
 process.env.ATTRIBUT_POLL_INTERVAL_MS = '5'; // fast polling
@@ -207,7 +208,7 @@ test('parseConnectArgs reads --key/--token and --agent', () => {
   assert.equal(connect.parseConnectArgs(['--agent=agy']).agent, 'agy');
 });
 
-test('runConnect --key: non-interactive install + emit, no device flow', async () => {
+test('runConnect --key: non-interactive installs ALL tools + emits, no device flow', async () => {
   const srv = await startServer([{ status: 'pending' }]);
   try {
     const code = await connect.runConnect(['--key=cloud-tok', `--endpoint=${srv.origin}`]);
@@ -217,15 +218,23 @@ test('runConnect --key: non-interactive install + emit, no device flow', async (
     assert.equal(srv.calls.start.length, 0);
     assert.equal(srv.calls.poll.length, 0);
 
-    // token persisted under the default agent + hook installed
-    assert.equal(tokenStore.readToken('claude_code'), 'cloud-tok');
+    // Default (no --agent) wires up EVERY installable tool under the ONE token —
+    // proven by codex/cursor/agy getting it without being named. Hooks written.
+    for (const a of ['claude_code', 'agy', 'codex', 'cursor']) {
+      assert.equal(tokenStore.readToken(a), 'cloud-tok');
+    }
     assert.match(fs.readFileSync(process.env.CLAUDE_SETTINGS_PATH, 'utf8'), /collector\.cjs/);
+    assert.match(fs.readFileSync(process.env.CODEX_CONFIG_PATH, 'utf8'), /--provider openai/);
 
-    // emitted the connection event with the token's bearer
-    assert.equal(srv.calls.connect.length, 1);
+    // One connection event per connected tool, each bearing the shared token.
+    assert.equal(srv.calls.connect.length, 4);
     assert.equal(srv.calls.connect[0].headers['authorization'], 'Bearer cloud-tok');
     assert.equal(srv.calls.connect[0].body.agent, 'claude_code');
     assert.equal(srv.calls.connect[0].body.connector_type, 'otel');
+    assert.deepEqual(
+      srv.calls.connect.map((c) => c.body.agent).sort(),
+      ['agy', 'claude_code', 'codex', 'cursor'],
+    );
   } finally {
     await srv.close();
   }

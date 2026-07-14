@@ -68,16 +68,19 @@ Two modes:
   Pick the tools to capture, approve in a browser (where you're signed in), and
   the hooks install themselves. No token to copy.
 
-  Non-interactive (token) — for remote/cloud sandboxes with NO interactivity:
-    attribut connect --key=<ingest-token> [--agent=claude_code]
-  Pairs straight from a minted token (the one the web "App · Cloud" card hands
-  you). Put it in the environment's Setup script — no browser, no prompts.
+  Non-interactive (token) — the browser-free path (cloud sandboxes + the app's
+  one-line onboarding):
+    attribut connect --key=<ingest-token> [--agent=<slug>]
+  Pairs from a minted token and wires up EVERY installable tool on the machine —
+  same as the interactive connect, minus the browser. No prompts. Add --agent to
+  scope it to one provider.
 
 Options:
   --agents=<a,b>   Interactive: agents to connect, skips the prompt.
                    Installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.
   --key=<token>    Non-interactive: the ingest token to pair with.
-  --agent=<slug>   Non-interactive: the token's agent (default claude_code).
+  --agent=<slug>   Non-interactive: connect ONLY this provider (default: every
+                   installable tool). One of ${installer.INSTALLABLE_AGENTS.join(', ')}.
   --backfill       Non-interactive: also import the last 90 days of local
                    history after pairing. Default OFF for --key — so an
                    ephemeral cloud env doesn't re-import on every boot.
@@ -460,46 +463,73 @@ async function runConnect(argv) {
 }
 
 /**
- * Non-interactive pairing from a pre-minted token. Installs ONE agent's hook
- * (the token is agent-scoped server-side; default claude_code) and emits the
- * connection-established event. Built for remote/cloud sandboxes where there is
- * no browser and no interactivity — drop it in the environment's Setup script.
- * Returns an exit code.
+ * Non-interactive pairing from a pre-minted token — the browser-free equivalent
+ * of the interactive `connect`. By default it wires up EVERY installable tool on
+ * the machine (claude_code, agy, codex, cursor), so one keyed command captures
+ * the whole system; `--agent=<slug>` narrows it to a single provider. The token
+ * serves all of them: session attribution is by each hook's own baked provider,
+ * NOT by the token, so one token safely carries every tool's sessions. Built for
+ * remote/cloud sandboxes and the app's one-line onboarding. Returns an exit code.
  */
 async function runTokenConnect(opts) {
-  const agent = opts.agent || 'claude_code';
-  if (!installer.INSTALLABLE_AGENTS.includes(agent)) {
-    err(`Cannot connect agent "${agent}" — installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.`);
-    return 2;
+  // Scope: an explicit --agent connects ONLY that provider; otherwise connect
+  // every installable tool (parity with interactive `connect`, minus the browser).
+  let agents;
+  if (opts.agent) {
+    if (!installer.INSTALLABLE_AGENTS.includes(opts.agent)) {
+      err(`Cannot connect agent "${opts.agent}" — installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.`);
+      return 2;
+    }
+    agents = [opts.agent];
+  } else {
+    agents = installer.INSTALLABLE_AGENTS.slice();
   }
+
   const ingestBase = ingestBaseFrom(opts, null);
-  try {
-    installer.registerAgent({ agent, token: opts.key, ingestBase });
-  } catch (e) {
-    err(`Could not install ${agent}: ${e.message}`);
+
+  // Install each tool's capture hook, all authenticated by the one token. When
+  // connecting the whole machine, a single provider that can't be wired (tool not
+  // present, unwritable config) is skipped so the rest still connect; when a
+  // single --agent was requested, its failure is fatal.
+  const installed = [];
+  for (const agent of agents) {
+    try {
+      installer.registerAgent({ agent, token: opts.key, ingestBase });
+      installed.push(agent);
+      out(`✓ Installed capture hook for ${agent}`);
+    } catch (e) {
+      if (opts.agent) {
+        err(`Could not install ${agent}: ${e.message}`);
+        return 1;
+      }
+      err(`  (skipped ${agent}: ${e.message})`);
+    }
+  }
+  if (installed.length === 0) {
+    err('No capture hooks could be installed.');
     return 1;
   }
-  out(`✓ Installed capture hook for ${agent}`);
-  await emitConnected({
-    agent,
-    token: opts.key,
-    ingestBase,
-    deviceUuid: getOrCreateDeviceUuid(),
-    hostname: os.hostname(),
-  });
-  timer.installTimer();
-  out(`✓ Connection established for: ${agent}`);
 
-  // Opt-in history import. OFF by default on the --key path: this is the
-  // cloud/scripted route, where a fresh ephemeral env usually has no local
-  // history and an unconditional import would re-scan + re-POST 90 days on every
-  // boot (safe — the server dedupes by sessionId — but wasteful). `--backfill`
-  // turns it on for the one-time case (onboarding on a real dev machine). Uses
-  // the headless path since --key environments are typically non-TTY. Never
-  // fatal — pairing already succeeded.
+  // Emit a connection-established event per connected tool (the edge stamps the
+  // token's pairedAt from these — the signal the app's onboarding poll watches).
+  const deviceUuid = getOrCreateDeviceUuid();
+  const hostname = os.hostname();
+  for (const agent of installed) {
+    await emitConnected({ agent, token: opts.key, ingestBase, deviceUuid, hostname });
+  }
+  timer.installTimer();
+  out(`✓ Connection established for: ${installed.join(', ')}`);
+
+  // Opt-in history import across every connected tool. OFF by default on the
+  // --key path: this is the cloud/scripted route, where a fresh ephemeral env
+  // usually has no local history and an unconditional import would re-scan +
+  // re-POST 90 days on every boot (safe — the server dedupes by sessionId — but
+  // wasteful). `--backfill` turns it on for the one-time case (onboarding on a
+  // real dev machine). Uses the headless path since --key envs are typically
+  // non-TTY. Never fatal — pairing already succeeded.
   if (opts.backfill === true) {
     try {
-      await require('./backfill.cjs').runBackfillHeadless({ agents: [agent], ingestBase });
+      await require('./backfill.cjs').runBackfillHeadless({ agents: installed, ingestBase });
     } catch (e) {
       out(`  (backfill skipped: ${e.message})`);
     }
