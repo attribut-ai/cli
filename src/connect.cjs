@@ -61,31 +61,29 @@ function err(msg) {
 const CONNECT_HELP = `
 attribut connect — connect this device to ATTRIBUT
 
-Two modes:
+One flow, two ways in. Both pick the tools to capture, install their hooks, and
+import your last 90 days — they differ ONLY in how the device is authorized:
 
-  Interactive (device flow) — the default for terminals:
+  Default (device flow) — for terminals:
     attribut connect [--agents=claude_code,agy] [--no-browser]
-  Pick the tools to capture, approve in a browser (where you're signed in), and
-  the hooks install themselves. No token to copy.
+  Approve in a browser where you're already signed in; no token to copy.
 
-  Non-interactive (token) — the browser-free path (cloud sandboxes + the app's
-  one-line onboarding):
+  With a key — skip the browser approval (the app's one-line onboarding gives you
+  this; also handy for cloud sandboxes):
     attribut connect --key=<ingest-token> [--agent=<slug>]
-  Pairs from a minted token and wires up EVERY installable tool on the machine —
-  same as the interactive connect, minus the browser. No prompts. Add --agent to
-  scope it to one provider.
+  Identical to the default, minus the browser step: the picker still runs on a
+  terminal, and the last 90 days still import. One token serves every tool.
 
 Options:
-  --agents=<a,b>   Interactive: agents to connect, skips the prompt.
+  --agents=<a,b>   Tools to connect, skipping the picker.
                    Installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.
-  --key=<token>    Non-interactive: the ingest token to pair with.
-  --agent=<slug>   Non-interactive: connect ONLY this provider (default: every
-                   installable tool). One of ${installer.INSTALLABLE_AGENTS.join(', ')}.
-  --backfill       Non-interactive: also import the last 90 days of local
-                   history after pairing. Default OFF for --key — so an
-                   ephemeral cloud env doesn't re-import on every boot.
-  --no-backfill    Interactive: skip the automatic 90-day history import.
-  --no-browser     Interactive: don't auto-open a browser — just print code+URL.
+  --key=<token>    Pair from a minted ingest token instead of the browser flow.
+  --agent=<slug>   Scope to ONE provider (alias for a single --agents value).
+                   One of ${installer.INSTALLABLE_AGENTS.join(', ')}.
+  --no-backfill    Skip the automatic 90-day history import (on by default).
+  --backfill       Force the history import (already the default — kept for
+                   back-compat with older onboarding commands).
+  --no-browser     Device flow: don't auto-open a browser — just print the URL.
   --app-base=<u>   Override the app origin (default ${DEFAULT_APP_BASE}).
   --endpoint=<u>   Override the ingest origin (default ${DEFAULT_INGEST_BASE}).
   -h, --help       Show this help.
@@ -237,6 +235,16 @@ async function resolveAgents(opts) {
   if (opts.agents) return validateAgents(opts.agents);
 
   if (!process.stdin.isTTY) {
+    // Non-interactive, no explicit pick. The keyed path (cloud sandboxes / scripted
+    // onboarding) can safely wire up EVERY tool under its one token, so default to
+    // all; the browser device flow can't, so it stays on Claude Code. Either is
+    // overridable with --agents.
+    if (opts.key) {
+      const all = installer.INSTALLABLE_AGENTS.slice();
+      out(`No TTY and no --agents given; connecting every installable tool: ${all.join(', ')}`);
+      out('  (pass --agents=… or --agent=… to choose explicitly.)');
+      return all;
+    }
     out('No TTY and no --agents given; defaulting to: claude_code');
     out('  (re-run with --agents=claude_code,agy to choose explicitly.)');
     return ['claude_code'];
@@ -303,6 +311,19 @@ function openBrowser(url, opts) {
 
 /**
  * `attribut connect [...]`. Returns an exit code (0 ok, non-zero on failure).
+ *
+ * ONE flow, two ways in — they diverge in exactly ONE step, how the device is
+ * authorized, and are otherwise identical (banner → tool picker → install hooks →
+ * emit → heartbeat timer → 90-day backfill → outro):
+ *   • default        — the OAuth-style device flow: approve in a browser where
+ *                       you're already signed in; the server mints per-agent tokens.
+ *   • --key=<token>   — you already hold a minted ingest token (the app's one-line
+ *                       onboarding hands you `connect --key=…`), so the browser
+ *                       approval is skipped. The one token serves every selected
+ *                       tool — attribution is by each hook's baked provider, not the
+ *                       token — so a single token safely carries them all. --agent
+ *                       (or --agents) scopes which tools; the picker still runs on a
+ *                       TTY when neither is given.
  */
 async function runConnect(argv) {
   const opts = parseConnectArgs(argv || []);
@@ -311,9 +332,13 @@ async function runConnect(argv) {
     return 0;
   }
 
-  // Non-interactive token mode: pair straight from a minted token. This is the
-  // remote/cloud-sandbox path — no browser, no prompts, no polling.
-  if (opts.key) return runTokenConnect(opts);
+  // --agent (singular) is a back-compat alias for scoping to a single provider;
+  // fold it into the shared --agents selection so one flow handles both. An
+  // explicit --agents always wins.
+  if (opts.agent && !opts.agents) opts.agents = [opts.agent];
+
+  // The ONLY thing --key changes is skipping the browser device-flow auth below.
+  const keyed = !!opts.key;
 
   ui.showBanner();
   await ui.intro('Connect this device to ATTRIBUT');
@@ -325,82 +350,93 @@ async function runConnect(argv) {
     return 2;
   }
 
-  const appBase = appBaseFrom(opts);
-  const deviceCode = crypto.randomBytes(32).toString('base64url');
   const hostname = os.hostname();
-
-  // 1) Start the device flow. This is a network round-trip to the app, so show a
-  // spinner — otherwise the wait between the tool picker and the approval link
-  // reads as a freeze.
-  const startSpin = await ui.spinner();
-  startSpin.start('Requesting an approval link…');
-  let start;
-  try {
-    start = await postJson(`${appBase}/api/device/start`, { deviceCode, hostname, agents });
-  } catch (e) {
-    startSpin.error('Could not reach ATTRIBUT');
-    err(`Could not reach ${appBase}: ${e.message}`);
-    return 1;
-  }
-  if (start.status < 200 || start.status >= 300 || !start.json || !start.json.userCode) {
-    startSpin.error('Could not start approval');
-    err(`Device start failed (HTTP ${start.status}): ${(start.json && start.json.error) || start.text || 'unknown error'}`);
-    return 1;
-  }
-  startSpin.stop('Approval link ready');
-  const { verificationUrl, expireAt } = start.json;
-
-  // 2) Tell the user where to approve (and try to open it for them). The
-  // verification URL already carries the code and the approval page has no code
-  // field, so we show only the link — no separate code to read or type.
-  const opened = openBrowser(verificationUrl, opts);
-  await ui.note(
-    `${verificationUrl}\n\n${
-      opened ? 'Opened in your browser — approve there.' : 'Open this link on any device to approve.'
-    }`,
-    'Approve this device'
-  );
-
-  // 3) Poll until approved / expired / deadline. Guard the env override: a
-  // non-numeric/NaN or <=0 value would make sleep() spin and hammer the server,
-  // so fall back to the 3000 ms default; otherwise floor positive values at a
-  // small minimum (tests set 5 ms for fast polling — the floor must not exceed it).
-  const rawInterval = Number.parseInt(process.env.ATTRIBUT_POLL_INTERVAL_MS, 10);
-  const interval = Number.isFinite(rawInterval) && rawInterval > 0 ? Math.max(5, rawInterval) : 3000;
-  const deadline = Date.parse(expireAt) || Date.now() + 10 * 60 * 1000;
-  const spin = await ui.spinner();
-  spin.start('Waiting for approval…');
   let configs = null;
-  while (Date.now() < deadline) {
-    await sleep(interval);
-    let poll;
-    try {
-      poll = await postJson(`${appBase}/api/device/poll`, { deviceCode });
-    } catch (e) {
-      spin.error('Approval check failed');
-      err(`Poll failed: ${e.message}`);
-      return 1;
-    }
-    const status = poll.json && poll.json.status;
-    if (status === 'approved') {
-      configs = normalizeConfigs(poll.json);
-      break;
-    }
-    if (status === 'expired') {
-      spin.error('Request expired');
-      err('The request expired before it was approved. Re-run `attribut connect`.');
-      return 1;
-    }
-    // 'pending' (or anything else) → keep waiting.
-  }
-  if (!configs) {
-    spin.error('Timed out');
-    err('Timed out waiting for approval. Re-run `attribut connect`.');
-    return 1;
-  }
-  spin.stop('Approved');
 
-  // 4) Install each agent's hook (persisting its per-agent token) + emit.
+  if (keyed) {
+    // AUTH STEP SKIPPED. We already hold a minted ingest token, so there's nothing
+    // to approve in a browser — build one config per selected tool straight from
+    // the token and fall through to the shared install/emit/backfill tail.
+    await ui.log.info('Using your key — no browser sign-in needed.');
+    configs = agents.map((agent) => ({ agent, token: opts.key, endpoint: null }));
+  } else {
+    const appBase = appBaseFrom(opts);
+    const deviceCode = crypto.randomBytes(32).toString('base64url');
+
+    // 1) Start the device flow. This is a network round-trip to the app, so show a
+    // spinner — otherwise the wait between the tool picker and the approval link
+    // reads as a freeze.
+    const startSpin = await ui.spinner();
+    startSpin.start('Requesting an approval link…');
+    let start;
+    try {
+      start = await postJson(`${appBase}/api/device/start`, { deviceCode, hostname, agents });
+    } catch (e) {
+      startSpin.error('Could not reach ATTRIBUT');
+      err(`Could not reach ${appBase}: ${e.message}`);
+      return 1;
+    }
+    if (start.status < 200 || start.status >= 300 || !start.json || !start.json.userCode) {
+      startSpin.error('Could not start approval');
+      err(`Device start failed (HTTP ${start.status}): ${(start.json && start.json.error) || start.text || 'unknown error'}`);
+      return 1;
+    }
+    startSpin.stop('Approval link ready');
+    const { verificationUrl, expireAt } = start.json;
+
+    // 2) Tell the user where to approve (and try to open it for them). The
+    // verification URL already carries the code and the approval page has no code
+    // field, so we show only the link — no separate code to read or type.
+    const opened = openBrowser(verificationUrl, opts);
+    await ui.note(
+      `${verificationUrl}\n\n${
+        opened ? 'Opened in your browser — approve there.' : 'Open this link on any device to approve.'
+      }`,
+      'Approve this device'
+    );
+
+    // 3) Poll until approved / expired / deadline. Guard the env override: a
+    // non-numeric/NaN or <=0 value would make sleep() spin and hammer the server,
+    // so fall back to the 3000 ms default; otherwise floor positive values at a
+    // small minimum (tests set 5 ms for fast polling — the floor must not exceed it).
+    const rawInterval = Number.parseInt(process.env.ATTRIBUT_POLL_INTERVAL_MS, 10);
+    const interval = Number.isFinite(rawInterval) && rawInterval > 0 ? Math.max(5, rawInterval) : 3000;
+    const deadline = Date.parse(expireAt) || Date.now() + 10 * 60 * 1000;
+    const spin = await ui.spinner();
+    spin.start('Waiting for approval…');
+    while (Date.now() < deadline) {
+      await sleep(interval);
+      let poll;
+      try {
+        poll = await postJson(`${appBase}/api/device/poll`, { deviceCode });
+      } catch (e) {
+        spin.error('Approval check failed');
+        err(`Poll failed: ${e.message}`);
+        return 1;
+      }
+      const status = poll.json && poll.json.status;
+      if (status === 'approved') {
+        configs = normalizeConfigs(poll.json);
+        break;
+      }
+      if (status === 'expired') {
+        spin.error('Request expired');
+        err('The request expired before it was approved. Re-run `attribut connect`.');
+        return 1;
+      }
+      // 'pending' (or anything else) → keep waiting.
+    }
+    if (!configs) {
+      spin.error('Timed out');
+      err('Timed out waiting for approval. Re-run `attribut connect`.');
+      return 1;
+    }
+    spin.stop('Approved');
+  }
+
+  // ---- Shared tail: identical for both the device-flow and --key paths --------
+
+  // 4) Install each agent's hook (persisting its token) + emit.
   const sampleEndpoint = configs.find((c) => c.endpoint)?.endpoint || null;
   const ingestBase = ingestBaseFrom(opts, sampleEndpoint);
   const deviceUuid = getOrCreateDeviceUuid();
@@ -421,7 +457,7 @@ async function runConnect(argv) {
     }
   }
   if (connected.length === 0) {
-    err('No connectable tools were returned by the server.');
+    err('No connectable tools — nothing was installed.');
     return 1;
   }
 
@@ -459,81 +495,6 @@ async function runConnect(argv) {
     `You're all set — ATTRIBUT is now capturing ${connected.map((c) => c.agent).join(', ')}.\n` +
       '  Restart any running sessions to pick up the hook.'
   );
-  return 0;
-}
-
-/**
- * Non-interactive pairing from a pre-minted token — the browser-free equivalent
- * of the interactive `connect`. By default it wires up EVERY installable tool on
- * the machine (claude_code, agy, codex, cursor), so one keyed command captures
- * the whole system; `--agent=<slug>` narrows it to a single provider. The token
- * serves all of them: session attribution is by each hook's own baked provider,
- * NOT by the token, so one token safely carries every tool's sessions. Built for
- * remote/cloud sandboxes and the app's one-line onboarding. Returns an exit code.
- */
-async function runTokenConnect(opts) {
-  // Scope: an explicit --agent connects ONLY that provider; otherwise connect
-  // every installable tool (parity with interactive `connect`, minus the browser).
-  let agents;
-  if (opts.agent) {
-    if (!installer.INSTALLABLE_AGENTS.includes(opts.agent)) {
-      err(`Cannot connect agent "${opts.agent}" — installable: ${installer.INSTALLABLE_AGENTS.join(', ')}.`);
-      return 2;
-    }
-    agents = [opts.agent];
-  } else {
-    agents = installer.INSTALLABLE_AGENTS.slice();
-  }
-
-  const ingestBase = ingestBaseFrom(opts, null);
-
-  // Install each tool's capture hook, all authenticated by the one token. When
-  // connecting the whole machine, a single provider that can't be wired (tool not
-  // present, unwritable config) is skipped so the rest still connect; when a
-  // single --agent was requested, its failure is fatal.
-  const installed = [];
-  for (const agent of agents) {
-    try {
-      installer.registerAgent({ agent, token: opts.key, ingestBase });
-      installed.push(agent);
-      out(`✓ Installed capture hook for ${agent}`);
-    } catch (e) {
-      if (opts.agent) {
-        err(`Could not install ${agent}: ${e.message}`);
-        return 1;
-      }
-      err(`  (skipped ${agent}: ${e.message})`);
-    }
-  }
-  if (installed.length === 0) {
-    err('No capture hooks could be installed.');
-    return 1;
-  }
-
-  // Emit a connection-established event per connected tool (the edge stamps the
-  // token's pairedAt from these — the signal the app's onboarding poll watches).
-  const deviceUuid = getOrCreateDeviceUuid();
-  const hostname = os.hostname();
-  for (const agent of installed) {
-    await emitConnected({ agent, token: opts.key, ingestBase, deviceUuid, hostname });
-  }
-  timer.installTimer();
-  out(`✓ Connection established for: ${installed.join(', ')}`);
-
-  // Opt-in history import across every connected tool. OFF by default on the
-  // --key path: this is the cloud/scripted route, where a fresh ephemeral env
-  // usually has no local history and an unconditional import would re-scan +
-  // re-POST 90 days on every boot (safe — the server dedupes by sessionId — but
-  // wasteful). `--backfill` turns it on for the one-time case (onboarding on a
-  // real dev machine). Uses the headless path since --key envs are typically
-  // non-TTY. Never fatal — pairing already succeeded.
-  if (opts.backfill === true) {
-    try {
-      await require('./backfill.cjs').runBackfillHeadless({ agents: installed, ingestBase });
-    } catch (e) {
-      out(`  (backfill skipped: ${e.message})`);
-    }
-  }
   return 0;
 }
 
