@@ -79,6 +79,119 @@ test('positive controls: the safe signals WERE extracted', () => {
   assert.strictEqual(p.num_tool_calls, 4); // list_dir, write, run_command, replace
 });
 
+// --- Subagent (child transcript) line-count privacy -------------------------
+//
+// The per-subagent 9-key structural breakdown (added Jul-2026) is derived by
+// childStats() re-reading the CHILD's OWN brainTranscriptPath and running the
+// SAME classifier (accumulateFileChange/classifyInto) the session-level path
+// uses — a distinct code path from the top-level transcript this file's other
+// tests cover. Plant a unique code string in a child's write_to_file tool call,
+// then prove (a) the subagent's lines_* counts are non-zero — the count WAS
+// derived from that content — and (b) the code text itself never appears
+// anywhere in buildAntigravitySubagents' output nor in a full envelope built
+// around it (mirroring how the real collector attaches
+// payload.antigravity.subagents, see src/collector.cjs).
+test(
+  'subagent line counts are derived from the child\'s own code but the code text never leaks',
+  { skip: !nodeSqlite },
+  () => {
+    const { buildSyntheticDb } = require('./fixtures/agy/build_db.cjs');
+    const conv = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-priv-sa-conv-'));
+    const brain = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-priv-sa-brain-'));
+    const prevC = process.env.AGY_CONVERSATIONS_DIR;
+    const prevB = process.env.AGY_BRAIN_DIR;
+    process.env.AGY_CONVERSATIONS_DIR = conv;
+    process.env.AGY_BRAIN_DIR = brain;
+
+    const PA = '44444444-4444-4444-4444-444444444444';
+    const K1 = '55555555-5555-5555-5555-555555555555';
+    const AGY_SUBAGENT_CODE_SENTINEL = 'AGY_SUBAGENT_DIFF_SECRET_CODE_4d1e';
+
+    try {
+      buildSyntheticDb(conv, PA, { input: 100, output: 10 });
+      buildSyntheticDb(conv, K1, { input: 2000, output: 500, parentId: PA, agentType: 'code-writer' });
+
+      // Child's own transcript: a write_to_file tool call whose CodeContent
+      // carries the sentinel. childStats() reads this file ONLY, classifies each
+      // line, then discards the text — only the 9 integer counts must survive.
+      const childDir = path.join(brain, K1, '.system_generated', 'logs');
+      fs.mkdirSync(childDir, { recursive: true });
+      const childLine = JSON.stringify({
+        type: 'PLANNER_RESPONSE',
+        source: 'MODEL',
+        created_at: '2026-06-13T01:00:00Z',
+        tool_calls: [
+          {
+            name: 'write_to_file',
+            args: {
+              TargetFile: '/tmp/agy_fix/child_worker.js',
+              CodeContent: `const secret = "${AGY_SUBAGENT_CODE_SENTINEL}";\n// a comment line\n\n`,
+            },
+          },
+        ],
+      });
+      fs.writeFileSync(path.join(childDir, 'transcript_full.jsonl'), childLine);
+
+      // Parent transcript declaring the subagent (labels only — never a prompt).
+      const ptx = path.join(brain, 'parent.jsonl');
+      fs.writeFileSync(
+        ptx,
+        JSON.stringify({
+          tool_calls: [
+            {
+              name: 'invoke_subagent',
+              args: { Subagents: [{ TypeName: 'code-writer', Role: 'Code Writer' }] },
+            },
+          ],
+        })
+      );
+
+      const subs = agy.buildAntigravitySubagents(ptx, PA);
+      assert.strictEqual(subs.length, 1, 'one subagent captured');
+      const s = subs[0];
+
+      // Positive control: the counts WERE derived from the child's own content.
+      assert.strictEqual(s.lines_code_added, 1, 'subagent code-added derived from its own content');
+      assert.strictEqual(s.lines_comment_added, 1, 'subagent comment-added derived from its own content');
+      assert.strictEqual(s.lines_blank_added, 1, 'subagent blank-added derived from its own content');
+      assert.ok(s.added_char_n > 0, 'subagent added_char_n derived from its own content');
+      assert.ok(s.added_char_sum > 0, 'subagent added_char_sum derived from its own content');
+
+      const serializedSubs = JSON.stringify(subs);
+      assert.ok(
+        !serializedSubs.includes(AGY_SUBAGENT_CODE_SENTINEL),
+        'LEAK: subagent code sentinel found in buildAntigravitySubagents output'
+      );
+
+      // Also prove it survives full envelope build+validation, mirroring how the
+      // real collector attaches payload.antigravity.subagents (src/collector.cjs).
+      const payload = agy.parseAntigravityTranscript(FIXTURE, {
+        sessionId: 'conv-priv-sub',
+        repo: '/tmp/agy_fix',
+        device_uuid: 'dev-1',
+      });
+      payload.antigravity.subagents = subs;
+      const env = buildAndValidate(payload, {
+        _trigger: 'posttooluse',
+        _source: 'cli',
+        _provider: 'google',
+        _tool: 'antigravity',
+      });
+      assert.ok(
+        !JSON.stringify(env).includes(AGY_SUBAGENT_CODE_SENTINEL),
+        'LEAK: subagent code sentinel found in produced envelope'
+      );
+    } finally {
+      if (prevC === undefined) delete process.env.AGY_CONVERSATIONS_DIR;
+      else process.env.AGY_CONVERSATIONS_DIR = prevC;
+      if (prevB === undefined) delete process.env.AGY_BRAIN_DIR;
+      else process.env.AGY_BRAIN_DIR = prevB;
+      fs.rmSync(conv, { recursive: true, force: true });
+      fs.rmSync(brain, { recursive: true, force: true });
+    }
+  }
+);
+
 test('no DB content leaks once usage_raw is injected', { skip: !nodeSqlite }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-priv-db-'));
   const prev = process.env.AGY_CONVERSATIONS_DIR;

@@ -125,13 +125,42 @@ test('subagent plane: child nests with role/model/tokens; totals fold', () => {
     assert.strictEqual(sa.input_tokens, 4000); // 5000 − 1000
     assert.strictEqual(sa.output_tokens, 300);
     assert.strictEqual(sa.cache_read_tokens, 1000);
-    assert.strictEqual(sa.tool_use_count, 1);
+    // exec_command + apply_patch (the latter added to exercise the structural
+    // line-count privacy assertions below).
+    assert.strictEqual(sa.tool_use_count, 2);
     // Folded session totals = parent base + child.
     assert.strictEqual(p.tokens_in, 4600); // 600 + 4000
     assert.strictEqual(p.tokens_out, 500); // 200 + 300
     assert.strictEqual(p.codex.cache_read_tokens, 1400); // 400 + 1000
     // No child body leaks either.
     assert.ok(!JSON.stringify(p).includes('CHILD_SECRET_BODY'));
+
+    // PRIVACY: subagent.jsonl's patch_apply_end carries CHILD_DIFF_SECRET_CODE_7b2c
+    // on an added code line, plus a blank added line and a removed code line. The
+    // child's own _struct (spread onto the public subagent record via `_struct` in
+    // buildCodexSubagents, surfaced by cleanSubagents) must reflect that content as
+    // INTEGER counts — while the code text itself must never appear anywhere.
+    assert.strictEqual(sa.lines_code_added, 1, 'subagent code-added derived from its own diff');
+    assert.strictEqual(sa.lines_blank_added, 1, 'subagent blank-added derived from its own diff');
+    assert.strictEqual(sa.lines_code_removed, 1, 'subagent code-removed derived from its own diff');
+    assert.ok(sa.added_char_n > 0, 'subagent added_char_n derived from its own diff');
+    assert.ok(sa.added_char_sum > 0, 'subagent added_char_sum derived from its own diff');
+    assert.ok(
+      !JSON.stringify(p).includes('CHILD_DIFF_SECRET_CODE_7b2c'),
+      'LEAK: subagent diff code sentinel found in parser payload'
+    );
+
+    // Also prove it survives full envelope build+validation without leaking.
+    const env = buildAndValidate(p, {
+      _trigger: 'stop',
+      _source: 'cli',
+      _provider: 'openai',
+      _tool: 'codex',
+    });
+    assert.ok(
+      !JSON.stringify(env).includes('CHILD_DIFF_SECRET_CODE_7b2c'),
+      'LEAK: subagent diff code sentinel found in produced envelope'
+    );
   } finally {
     if (prev === undefined) delete process.env.CODEX_SESSIONS_DIR;
     else process.env.CODEX_SESSIONS_DIR = prev;

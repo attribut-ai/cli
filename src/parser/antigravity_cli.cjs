@@ -348,18 +348,32 @@ function extractSubagentDecls(parentTranscriptPath) {
 
 // Derive a child's stats from its own transcript in a single pass: the per-tool
 // tool_uses breakdown (same { name, count } shape as a regular session) + total,
-// and the session window (started_at/ended_at/duration_ms from min/max per-line
-// `created_at`, mirroring the parent's own time derivation). Names, counts, and
-// timestamps only. Fail-safe: returns empty/null fields on any error.
+// the session window (started_at/ended_at/duration_ms from min/max per-line
+// `created_at`, mirroring the parent's own time derivation), AND the 9-key
+// structural line-count breakdown (code/comment/blank added+removed, char
+// stats). The structural counts reuse the SAME accumulateFileChange classifier
+// the session-level parse path uses (classifyInto/applyReplace under the hood),
+// run over this CHILD's own transcript file-change tool calls only — never the
+// parent's or the repo. Names, counts, and timestamps only; content is
+// classified + measured in memory then discarded. Fail-safe: returns
+// empty/null/zeroed fields on any error.
 function childStats(childTranscriptPath) {
   const counts = new Map(); // tool name -> count (names only)
   let tMin = null;
   let tMax = null;
+  const struct = newStructAccumulator();
   let raw;
   try {
     raw = fs.readFileSync(expandHome(childTranscriptPath), 'utf8');
   } catch {
-    return { tool_uses: [], tool_use_count: 0, started_at: null, ended_at: null, duration_ms: null };
+    return {
+      tool_uses: [],
+      tool_use_count: 0,
+      started_at: null,
+      ended_at: null,
+      duration_ms: null,
+      ...newStructAccumulator(),
+    };
   }
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
@@ -378,6 +392,9 @@ function childStats(childTranscriptPath) {
           const name = cap(call.name, CAP_LABEL);
           counts.set(name, (counts.get(name) || 0) + 1);
         }
+        // Structural line counts (counts only; content classified in-memory then
+        // discarded — never returned). Same classifier as the session-level path.
+        accumulateFileChange(call, struct);
       }
     } catch {
       /* skip */
@@ -391,6 +408,7 @@ function childStats(childTranscriptPath) {
     started_at: tMin !== null ? new Date(tMin).toISOString() : null,
     ended_at: tMax !== null ? new Date(tMax).toISOString() : null,
     duration_ms: tMin !== null && tMax !== null ? tMax - tMin : null,
+    ...struct,
   };
 }
 
@@ -412,9 +430,14 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
       // readUsageInputOutput()+readModel() each re-opening/re-scanning the DB.
       const gen = agyTokens.readGenMetadata(childId);
       const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0 };
-      const { tool_uses, tool_use_count, started_at, ended_at, duration_ms } = childStats(
-        brainTranscriptPath(childId)
-      );
+      const {
+        tool_uses,
+        tool_use_count,
+        started_at,
+        ended_at,
+        duration_ms,
+        ...structFields // the 9-key structural line-count breakdown (counts only)
+      } = childStats(brainTranscriptPath(childId));
       out.push({
         agent_type: agentType ? cap(agentType, CAP_LABEL) : null,
         role: agentType && roleByName[agentType] ? roleByName[agentType] : null,
@@ -427,6 +450,7 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
         started_at,
         ended_at,
         duration_ms,
+        ...structFields,
       });
     }
     return out;

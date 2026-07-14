@@ -115,6 +115,15 @@
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
                   "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_n": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sum": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sumsq": { "type": ["integer", "null"], "minimum": 0 },
                   "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
                   "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
@@ -207,6 +216,15 @@
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
                   "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_n": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sum": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sumsq": { "type": ["integer", "null"], "minimum": 0 },
                   "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
                   "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
@@ -298,6 +316,15 @@
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
                   "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_n": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sum": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sumsq": { "type": ["integer", "null"], "minimum": 0 },
                   "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
                   "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
