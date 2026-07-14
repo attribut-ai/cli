@@ -144,18 +144,21 @@ subagents (each its own composer) are nested into their parent session.
 **Headless / no browser:** pass `--no-browser` (or run where there's no display)
 and the CLI just prints the URL + code — approve it from your phone or laptop.
 
-**Remote / cloud sandboxes (no interactivity at all):** a remote env (e.g. Claude
-Code's App·Cloud) can't run the device flow — there's no human at startup. Mint a
-token in the web ("App · Cloud" card) and pair non-interactively from the
-environment's Setup script:
+**With a key (skip the browser approval):** when you already hold a minted ingest
+token — the app's one-line onboarding hands you `connect --key=…`, and it's also
+how a remote env like Claude Code's App·Cloud pairs without a human at startup —
+pass it with `--key`:
 
 ```sh
 npx attribut@latest connect --key=<ingest-token> [--agent=claude_code]
 ```
 
-This writes the token, installs that agent's hook, and emits the
-connection-established event — no browser, no prompts, no polling. (`--key` and
-`--token` are synonyms; the token is agent-scoped, default `claude_code`.)
+This is the **same flow as `connect`, minus the browser step**: on a terminal you
+still get the tool picker and the 90-day history import; in a non-interactive env
+it connects every installable tool under the one token, no prompts. Session
+attribution is by each hook's baked provider, not the token, so one token safely
+serves them all. Scope it with `--agent=<slug>` (or `--agents=a,b`); skip the
+import with `--no-backfill`. (`--key` and `--token` are synonyms.)
 
 Per-agent tokens are stored in `${ATTRIBUT_CONFIG_DIR:-~/.attribut}/token` as a
 `0600` JSON map (`{ "<agent>": "<token>" }`); the collector resolves its agent

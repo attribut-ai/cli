@@ -4,7 +4,8 @@
 // a local http server standing in for BOTH the app (/api/device/start|poll) and
 // the ingest edge (/v1/connect): agent selection, start payload, poll-until-
 // approved, per-agent token persistence + hook install, and the closing connect
-// emit. Also covers the pure arg/normalize helpers and the headless default.
+// emit. Also covers the pure arg/normalize helpers and the --key path, which now
+// shares the one flow (device-flow auth skipped, everything else identical).
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
