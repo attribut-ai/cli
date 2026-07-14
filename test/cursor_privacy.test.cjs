@@ -15,6 +15,7 @@ const path = require('path');
 const { buildCursorFixture } = require('./fixtures/cursor/build_db.cjs');
 
 const CID = '22222222-2222-2222-2222-222222222222';
+const SUB_CID = '33333333-3333-3333-3333-333333333333';
 
 // Distinct sentinels, one per content channel Cursor persists.
 const LEAKS = {
@@ -27,6 +28,7 @@ const LEAKS = {
   response: 'LEAK_RESPONSE_g7',
   toolinput: 'LEAK_TOOLINPUT_h8',
   bubbletext: 'LEAK_BUBBLETEXT_i9',
+  subSummary: 'LEAK_SUBAGENT_SUMMARY_j10', // child composer's content, never read
 };
 
 test('no content leaks; only the numeric + model-id allowlist is emitted', () => {
@@ -63,6 +65,27 @@ test('no content leaks; only the numeric + model-id allowlist is emitted', () =>
             { type: 'text', text: LEAKS.response },
             { type: 'tool_use', name: 'Shell', input: { command: LEAKS.toolinput } },
           ],
+        },
+      },
+    ],
+    // A child composer (subagent): carries its own native lines_added/lines_removed
+    // totals (the allowlisted signal) PLUS a content-bearing field (the
+    // conversation summary) that pickComposerFields never reads. Proves the
+    // subagent's coarse line counts surface while its content stays out.
+    subagents: [
+      {
+        composerId: SUB_CID,
+        model: 'gemini-3-pro',
+        totalLinesAdded: 17,
+        totalLinesRemoved: 6,
+        createdAt: 1762653140000,
+        lastUpdatedAt: 1762653500000,
+        bubbles: [
+          { type: 1, inputTokens: 0, outputTokens: 0 },
+          { type: 2, inputTokens: 1200, outputTokens: 150 },
+        ],
+        extra: {
+          latestConversationSummary: { summary: LEAKS.subSummary },
         },
       },
     ],
@@ -108,6 +131,21 @@ test('no content leaks; only the numeric + model-id allowlist is emitted', () =>
     assert.strictEqual(env.payload.cursor.lines_added, 33);
     assert.strictEqual(env.payload.cursor.user_email, 'dev@example.com');
     assert.deepStrictEqual(env.payload.tool_uses, [{ name: 'Shell', count: 1 }]);
+
+    // SUBAGENT: the child's native lines_added/lines_removed surface (positive
+    // control — Cursor has no code/comment/blank classification, only its own
+    // coarse 2-field count), while the child's content (conversation summary)
+    // never reaches the envelope (already covered by the LEAKS loop above via
+    // subSummary, asserted again here for clarity).
+    assert.strictEqual(env.payload.cursor.subagents.length, 1);
+    const sub = env.payload.cursor.subagents[0];
+    assert.strictEqual(sub.composer_id, SUB_CID);
+    assert.strictEqual(sub.lines_added, 17, 'subagent lines_added surfaces from its own composer row');
+    assert.strictEqual(sub.lines_removed, 6, 'subagent lines_removed surfaces from its own composer row');
+    assert.ok(
+      !blob.includes(LEAKS.subSummary),
+      'LEAK: subagent conversation summary found in the envelope'
+    );
   } finally {
     if (prevDb === undefined) delete process.env.CURSOR_STATE_DB;
     else process.env.CURSOR_STATE_DB = prevDb;

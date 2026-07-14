@@ -2,4 +2,6 @@
 {"timestamp":"2026-06-14T15:09:31.000Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"medium"}}
 {"timestamp":"2026-06-14T15:09:32.000Z","type":"event_msg","payload":{"type":"agent_message","message":"CHILD_SECRET_BODY"}}
 {"timestamp":"2026-06-14T15:09:33.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}"}}
+{"timestamp":"2026-06-14T15:09:34.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{}"}}
+{"timestamp":"2026-06-14T15:09:35.000Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"c2","success":true,"changes":{"/repo/worker.js":{"type":"update","unified_diff":"@@ -1,1 +1,2 @@\n+const secret = \"CHILD_DIFF_SECRET_CODE_7b2c\";\n+\n-const oldChildSecret = 0;\n"}}}}
 {"timestamp":"2026-06-14T15:09:40.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":1000,"output_tokens":300,"reasoning_output_tokens":20,"total_tokens":5300}}}}

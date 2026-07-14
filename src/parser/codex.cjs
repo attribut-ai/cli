@@ -348,8 +348,23 @@ function parseCodexRollout(rolloutPath, extra = {}) {
     // Fold child structural counts into the session totals.
     for (const k of Object.keys(struct)) struct[k] += (sa._struct && sa._struct[k]) || 0;
   }
-  // Strip the internal fold-only fields before the records enter the payload.
-  const cleanSubagents = subagents.map(({ _commitSHA, _struct, ...rest }) => rest);
+  // Strip the internal fold-only fields before the records enter the payload,
+  // but surface the 9-key structural breakdown (counts only) from `_struct` onto
+  // the public record so per-subagent VALUE is computable downstream. `_struct`
+  // is normally always present (extractStruct always returns the full 9 keys),
+  // but guard against null/absent defensively.
+  const cleanSubagents = subagents.map(({ _commitSHA, _struct, ...rest }) => ({
+    ...rest,
+    lines_code_added: (_struct && _struct.lines_code_added) || 0,
+    lines_comment_added: (_struct && _struct.lines_comment_added) || 0,
+    lines_blank_added: (_struct && _struct.lines_blank_added) || 0,
+    lines_code_removed: (_struct && _struct.lines_code_removed) || 0,
+    lines_comment_removed: (_struct && _struct.lines_comment_removed) || 0,
+    lines_blank_removed: (_struct && _struct.lines_blank_removed) || 0,
+    added_char_n: (_struct && _struct.added_char_n) || 0,
+    added_char_sum: (_struct && _struct.added_char_sum) || 0,
+    added_char_sumsq: (_struct && _struct.added_char_sumsq) || 0,
+  }));
 
   const model = models.size ? [...models][0] : null;
 
