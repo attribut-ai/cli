@@ -114,8 +114,10 @@ function detectInstall(collectorPath = defaultCollectorPath()) {
   else if (/[\\/]\.yarn[\\/]/.test(p) || /[\\/]yarn[\\/]global[\\/]/.test(p)) kind = 'yarn';
   else if (packageDir) kind = 'npm-global';
   else kind = 'checkout';
+  // Compare realpaths (symlinked $HOME), but REPORT the plain spelling — that
+  // is what gets handed to `npm --prefix`.
   const fallback = fallbackPrefixDir();
-  const rel = packageDir ? path.relative(fallback, packageDir) : null;
+  const rel = packageDir ? path.relative(resolvePathish(fallback), resolvePathish(packageDir)) : null;
   const prefix = rel !== null && !rel.startsWith('..') && !path.isAbsolute(rel) ? fallback : null;
   return { kind, packageDir, prefix };
 }
@@ -158,6 +160,16 @@ function fallbackPrefixDir() {
   return path.join(configDir(), 'npm');
 }
 
+// npm's prefix layout, per its own docs: packages go to `<prefix>/lib/node_modules`
+// and executables are linked into `<prefix>/bin` on POSIX; on Windows both sit
+// directly under `<prefix>`.
+function prefixLibDir(prefix) {
+  return process.platform === 'win32' ? path.join(prefix, 'node_modules') : path.join(prefix, 'lib', 'node_modules');
+}
+function prefixBinDir(prefix) {
+  return process.platform === 'win32' ? prefix : path.join(prefix, 'bin');
+}
+
 /**
  * Where a global install of `attribut` lands. With a known prefix the layout is
  * fixed, so compute it rather than shelling out — npm ≥10 REDACTS token-shaped
@@ -165,10 +177,30 @@ function fallbackPrefixDir() {
  * can hand back a path containing `***` for a perfectly valid p.
  */
 function globalCollectorPath(exec = execNpm, prefix = null) {
-  const root = prefix
-    ? path.join(prefix, ...(process.platform === 'win32' ? ['node_modules'] : ['lib', 'node_modules']))
-    : String(exec(['root', '-g'])).trim();
+  const root = prefix ? prefixLibDir(prefix) : String(exec(['root', '-g'])).trim();
   return path.join(root, 'attribut', 'src', 'collector.cjs');
+}
+
+/**
+ * realpathSync that tolerates a path that doesn't exist yet: resolve the deepest
+ * existing ancestor and re-append the rest. Needed because Node realpath-resolves
+ * `__dirname` but `configDir()` does not, so a symlinked $HOME (home-manager,
+ * roaming profiles, /tmp on macOS) would leave two spellings of the same
+ * directory comparing unequal.
+ */
+function resolvePathish(p) {
+  let head = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), ...tail);
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return path.resolve(p);
+      tail.unshift(path.basename(head));
+      head = parent;
+    }
+  }
 }
 
 /**
@@ -234,7 +266,13 @@ function installDurably(version, exec = execNpm, { prefix = null } = {}) {
     return { collector, prefix: p };
   };
 
-  if (prefix) return run(prefix);
+  if (prefix) {
+    try {
+      return run(prefix);
+    } catch (e) {
+      throw new Error(npmFailureReason(e));
+    }
+  }
 
   let globalRootWritable = false;
   try {
@@ -321,6 +359,7 @@ async function maybeNotifyUpdate({
   fetchLatest = fetchLatestVersion,
   isTTY = process.stderr.isTTY,
   currentVersion = PKG_VERSION,
+  installInfo = detectInstall(),
 } = {}) {
   try {
     if (!isTTY || process.env.CI) return null;
@@ -344,7 +383,10 @@ async function maybeNotifyUpdate({
     }
 
     if (compareSemver(latest, currentVersion) !== 1) return null;
-    const msg = `update available: ${currentVersion} → ${latest} — run \`attribut update\``;
+    // A fallback-prefix install is durable but usually NOT on PATH, so naming
+    // the bare command would send those users after something they can't run.
+    const cmd = installInfo && installInfo.prefix ? 'npx attribut update' : 'attribut update';
+    const msg = `update available: ${currentVersion} → ${latest} — run \`${cmd}\``;
     log(msg);
     return msg;
   } catch {
@@ -445,7 +487,9 @@ async function maybeAutoUpdate({
       exec(args);
       return { attempted: true, ok: true, reason: `updated ${currentVersion} → ${updateTo}` };
     } catch (e) {
-      return { attempted: true, ok: false, reason: `npm install failed: ${e.message}` };
+      // execFileSync stuffs npm's ENTIRE stderr into e.message — condense it, or
+      // a failed background update dumps ~35 lines into the heartbeat log hourly.
+      return { attempted: true, ok: false, reason: `npm install failed: ${npmFailureReason(e)}` };
     } finally {
       try {
         fs.rmdirSync(lockDir);
@@ -480,7 +524,7 @@ function ensureDurableCollector(collectorPath = defaultCollectorPath(), exec = e
       // instead. Hooks and the timer use absolute paths so capture works
       // either way — PATH only matters for typing `attribut` yourself.
       log(`the system npm prefix isn't writable — installed under ${prefix} instead.`);
-      log(`add ${path.join(prefix, 'bin')} to PATH to run \`attribut\` directly.`);
+      log(`add ${prefixBinDir(prefix)} to PATH to run \`attribut\` directly.`);
     }
     log(`installed durably — hooks will use ${collector}`);
     durableCache.set(collectorPath, collector);
@@ -603,7 +647,7 @@ async function runUpdate(argv, { exec = execNpm, fetchLatest = fetchLatestVersio
   }
   if (usedPrefix && !info.prefix) {
     out(`The system npm prefix isn't writable — installed under ${usedPrefix}.`);
-    out(`Add ${path.join(usedPrefix, 'bin')} to PATH to run \`attribut\` directly.`);
+    out(`Add ${prefixBinDir(usedPrefix)} to PATH to run \`attribut\` directly.`);
   }
 
   // If the running collector isn't the durable one (npx heal, manager

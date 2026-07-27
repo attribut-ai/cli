@@ -207,6 +207,35 @@ test('installDurably honours an explicit prefix and never probes global', { skip
   assert.deepEqual(calls, [`install -g --prefix ${prefix} attribut@9.9.9`], 'one npm call, no root probe');
 });
 
+test('installDurably condenses a failure in the explicit-prefix branch too', { skip: IS_WIN }, () => {
+  // execFileSync stuffs npm's whole stderr into e.message, so an unwrapped
+  // throw here would put the wall back in front of the users this fix is for.
+  const exec = () => {
+    const e = new Error(`Command failed: npm install\n${EACCES_STDERR}`);
+    e.stderr = EACCES_STDERR;
+    throw e;
+  };
+  assert.throws(() => update.installDurably('9.9.9', exec, { prefix: path.join(tmpDir, 'p') }), (err) => {
+    assert.equal(err.message.includes('\n'), false, 'one line');
+    assert.match(err.message, /EACCES/);
+    return true;
+  });
+});
+
+test('detectInstall sees through a symlinked config dir', { skip: IS_WIN }, () => {
+  // Node realpath-resolves __dirname but configDir() does not, so the two
+  // spellings must be compared resolved or a symlinked $HOME loses the prefix.
+  const real = path.join(tmpDir, 'real-home');
+  const link = path.join(tmpDir, 'link-home');
+  fs.mkdirSync(path.join(real, 'npm', 'lib', 'node_modules', 'attribut'), { recursive: true });
+  fs.symlinkSync(real, link);
+  process.env.ATTRIBUT_CONFIG_DIR = link; // config dir reached via the symlink…
+  const viaReal = path.join(real, 'npm', 'lib', 'node_modules', 'attribut', 'src', 'collector.cjs');
+  // …install found via the real path. Reported in the symlinked spelling, which
+  // is what `npm --prefix` gets.
+  assert.equal(update.detectInstall(viaReal).prefix, path.join(link, 'npm'));
+});
+
 test('installDurably skips the global attempt when the global root is not writable', { skip: IS_WIN }, () => {
   if (process.getuid && process.getuid() === 0) return; // root can write anywhere
   const locked = path.join(tmpDir, 'locked');
@@ -343,11 +372,15 @@ test('maybeAutoUpdate backs off a recently attempted target but not a new one', 
 
 test('maybeAutoUpdate reports npm failure without throwing and keeps backoff', { skip: IS_WIN }, async () => {
   const boom = () => {
-    throw new Error('EACCES');
+    // Shaped like the real thing: execFileSync puts npm's whole stderr in both.
+    const e = new Error(`Command failed: npm install -g\n${EACCES_STDERR}`);
+    e.stderr = EACCES_STDERR;
+    throw e;
   };
   const r = await update.maybeAutoUpdate({ updateTo: '99.0.0', exec: boom, installInfo: fakeNpmGlobal() });
   assert.deepEqual([r.attempted, r.ok], [true, false]);
   assert.match(r.reason, /EACCES/);
+  assert.equal(r.reason.includes('\n'), false, 'the hourly log gets one line, not npm’s wall');
   assert.equal(readState().auto_update.target, '99.0.0', 'failed attempt still counts toward backoff');
   assert.equal(fs.existsSync(path.join(tmpDir, 'update.lock')), false, 'lock released on failure');
 });
@@ -409,6 +442,23 @@ test('maybeNotifyUpdate notifies on TTY when the registry is ahead, and caches',
   const msg2 = await update.maybeNotifyUpdate({ isTTY: true, fetchLatest });
   assert.match(msg2, /99\.0\.0/);
   assert.equal(fetches, 1);
+});
+
+test('maybeNotifyUpdate names npx when the install is not on PATH', async () => {
+  const fetchLatest = async () => '99.0.0';
+  const onPath = await update.maybeNotifyUpdate({
+    isTTY: true,
+    fetchLatest,
+    installInfo: { kind: 'npm-global', packageDir: '/usr/local/lib/node_modules/attribut', prefix: null },
+  });
+  assert.match(onPath, /run `attribut update`/);
+
+  const offPath = await update.maybeNotifyUpdate({
+    isTTY: true,
+    fetchLatest,
+    installInfo: { kind: 'npm-global', packageDir: 'x', prefix: update.fallbackPrefixDir() },
+  });
+  assert.match(offPath, /run `npx attribut update`/);
 });
 
 test('maybeNotifyUpdate stays silent when current, non-TTY, CI, opted out, or failing', async () => {
