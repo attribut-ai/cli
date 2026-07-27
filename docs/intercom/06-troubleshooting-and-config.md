@@ -26,6 +26,8 @@ If you see that, data is being sent.
 npm i -g attribut
 ```
 
+If that fails with `EACCES`, run `npx attribut connect` instead — it installs durably under `~/.attribut/npm` and re-points every hook there, without sudo.
+
 ## Configuration
 
 The connector reads these environment variables:

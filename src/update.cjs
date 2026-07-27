@@ -24,6 +24,14 @@
 // update`, which either runs the right manager's command or says what to run.
 // Opt-outs: ATTRIBUT_NO_AUTO_UPDATE=1 (env) or `attribut update --auto=off`
 // (marker file, survives launchd/systemd's sparse env).
+//
+// NPM PREFIX: a distro-packaged Node (apt/nodesource on Linux) puts the global
+// root at a root-owned /usr/local/lib/node_modules, so `npm i -g` is EACCES for
+// a normal user — the default path for anyone running `npx attribut connect` on
+// a fresh box. Every install here therefore falls back to a user-owned prefix
+// (~/.attribut/npm) rather than giving up, and detectInstall reports that prefix
+// so later updates keep landing in the same root. Hooks and the heartbeat timer
+// bake absolute paths, so capture works whether or not that bin dir is on PATH.
 
 const fs = require('fs');
 const os = require('os');
@@ -88,9 +96,11 @@ function isEphemeralInstall(p) {
 
 /**
  * Classify where this code is running from, by collector path. Returns
- * { kind, packageDir } where kind ∈ npm-global | pnpm | bun | yarn | npx |
- * checkout, and packageDir is the `.../node_modules/attribut` root when the
- * path has one (null for a source checkout).
+ * { kind, packageDir, prefix } where kind ∈ npm-global | pnpm | bun | yarn |
+ * npx | checkout, packageDir is the `.../node_modules/attribut` root when the
+ * path has one (null for a source checkout), and prefix is our user-owned npm
+ * prefix when this install lives there (null otherwise) — every later
+ * `npm i -g` must carry the same `--prefix` or it lands in the wrong root.
  */
 function detectInstall(collectorPath = defaultCollectorPath()) {
   const p = String(collectorPath);
@@ -104,7 +114,12 @@ function detectInstall(collectorPath = defaultCollectorPath()) {
   else if (/[\\/]\.yarn[\\/]/.test(p) || /[\\/]yarn[\\/]global[\\/]/.test(p)) kind = 'yarn';
   else if (packageDir) kind = 'npm-global';
   else kind = 'checkout';
-  return { kind, packageDir };
+  // Compare realpaths (symlinked $HOME), but REPORT the plain spelling — that
+  // is what gets handed to `npm --prefix`.
+  const fallback = fallbackPrefixDir();
+  const rel = packageDir ? path.relative(resolvePathish(fallback), resolvePathish(packageDir)) : null;
+  const prefix = rel !== null && !rel.startsWith('..') && !path.isAbsolute(rel) ? fallback : null;
+  return { kind, packageDir, prefix };
 }
 
 function defaultCollectorPath() {
@@ -135,10 +150,150 @@ function execNpm(args, { stdio = 'pipe', timeoutMs = 120000 } = {}) {
   });
 }
 
-/** `<npm root -g>/attribut/src/collector.cjs` — where a global install lands. */
-function globalCollectorPath(exec = execNpm) {
-  const root = String(exec(['root', '-g'])).trim();
+/**
+ * The npm prefix we fall back to when the system-wide one is root-owned — the
+ * default on a distro-packaged Node (Ubuntu: /usr/local/lib/node_modules), where
+ * a plain `npm i -g` dies with EACCES for a normal user. Self-contained under
+ * the config dir so `attribut uninstall` semantics stay "delete ~/.attribut".
+ */
+function fallbackPrefixDir() {
+  return path.join(configDir(), 'npm');
+}
+
+// npm's prefix layout, per its own docs: packages go to `<prefix>/lib/node_modules`
+// and executables are linked into `<prefix>/bin` on POSIX; on Windows both sit
+// directly under `<prefix>`.
+function prefixLibDir(prefix) {
+  return process.platform === 'win32' ? path.join(prefix, 'node_modules') : path.join(prefix, 'lib', 'node_modules');
+}
+function prefixBinDir(prefix) {
+  return process.platform === 'win32' ? prefix : path.join(prefix, 'bin');
+}
+
+/**
+ * Where a global install of `attribut` lands. With a known prefix the layout is
+ * fixed, so compute it rather than shelling out — npm ≥10 REDACTS token-shaped
+ * substrings (UUIDs included) from its own output, so `npm root -g --prefix p`
+ * can hand back a path containing `***` for a perfectly valid p.
+ */
+function globalCollectorPath(exec = execNpm, prefix = null) {
+  const root = prefix ? prefixLibDir(prefix) : String(exec(['root', '-g'])).trim();
   return path.join(root, 'attribut', 'src', 'collector.cjs');
+}
+
+/**
+ * realpathSync that tolerates a path that doesn't exist yet: resolve the deepest
+ * existing ancestor and re-append the rest. Needed because Node realpath-resolves
+ * `__dirname` but `configDir()` does not, so a symlinked $HOME (home-manager,
+ * roaming profiles, /tmp on macOS) would leave two spellings of the same
+ * directory comparing unequal.
+ */
+function resolvePathish(p) {
+  let head = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), ...tail);
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return path.resolve(p);
+      tail.unshift(path.basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Can this process create/replace `dir`? npm creates missing levels, so walk up
+ * to the nearest existing ancestor and test that. Any surprise → false (assume
+ * not writable and take the fallback, which is always safe).
+ */
+function isWritableTarget(dir) {
+  let p = path.resolve(dir);
+  for (;;) {
+    if (fs.existsSync(p)) {
+      try {
+        fs.accessSync(p, fs.constants.W_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    const parent = path.dirname(p);
+    if (parent === p) return false;
+    p = parent;
+  }
+}
+
+function isPermissionError(e) {
+  const text = `${(e && e.stderr) || ''}\n${(e && e.message) || ''}`;
+  return /EACCES|EPERM|EROFS|permission denied/i.test(text);
+}
+
+/** npm's failure wall is ~35 lines; keep the signal, drop the boilerplate. */
+function npmFailureReason(e) {
+  const text = `${(e && e.stderr) || ''}`;
+  const lines = text
+    .split('\n')
+    .map((l) => l.replace(/^npm (?:ERR!|error)\s?/, '').trim())
+    .filter((l) => l && !/^A complete log|^$/.test(l));
+  const code = lines.find((l) => /^code /.test(l));
+  const detail = lines.find((l) => /Error:|permission denied|ENOENT|EACCES|EPERM/i.test(l));
+  const picked = [code, detail].filter(Boolean).join(' — ');
+  return picked || (e && e.message ? String(e.message).split('\n')[0] : 'unknown npm failure');
+}
+
+/**
+ * Install `attribut@<version>` somewhere durable and return
+ * { collector, prefix } — prefix is null for a true global install, otherwise
+ * the user-owned prefix we fell back to.
+ *
+ * Order: an explicit `prefix` wins; otherwise try the system global root, but
+ * only when it's actually writable (probing first keeps npm's EACCES wall out
+ * of the connect UI in the common Linux case). A permission failure on the
+ * global attempt still falls back — the probe can be wrong under weird mounts.
+ * Throws with a one-line reason when nothing worked.
+ */
+function installDurably(version, exec = execNpm, { prefix = null } = {}) {
+  const spec = `attribut@${version}`;
+  const run = (p) => {
+    const args = ['install', '-g'];
+    if (p) args.push('--prefix', p);
+    args.push(spec);
+    exec(args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const collector = globalCollectorPath(exec, p);
+    if (!fs.existsSync(collector)) throw new Error(`expected collector missing at ${collector}`);
+    return { collector, prefix: p };
+  };
+
+  if (prefix) {
+    try {
+      return run(prefix);
+    } catch (e) {
+      throw new Error(npmFailureReason(e));
+    }
+  }
+
+  let globalRootWritable = false;
+  try {
+    globalRootWritable = isWritableTarget(String(exec(['root', '-g'])).trim());
+  } catch {
+    // Couldn't ask npm where global lives — try it anyway and let the error talk.
+    globalRootWritable = true;
+  }
+
+  if (globalRootWritable) {
+    try {
+      return run(null);
+    } catch (e) {
+      if (!isPermissionError(e)) throw new Error(npmFailureReason(e));
+    }
+  }
+  try {
+    return run(fallbackPrefixDir());
+  } catch (e) {
+    throw new Error(npmFailureReason(e));
+  }
 }
 
 // ---- registry check -------------------------------------------------------
@@ -204,6 +359,7 @@ async function maybeNotifyUpdate({
   fetchLatest = fetchLatestVersion,
   isTTY = process.stderr.isTTY,
   currentVersion = PKG_VERSION,
+  installInfo = detectInstall(),
 } = {}) {
   try {
     if (!isTTY || process.env.CI) return null;
@@ -227,7 +383,10 @@ async function maybeNotifyUpdate({
     }
 
     if (compareSemver(latest, currentVersion) !== 1) return null;
-    const msg = `update available: ${currentVersion} → ${latest} — run \`attribut update\``;
+    // A fallback-prefix install is durable but usually NOT on PATH, so naming
+    // the bare command would send those users after something they can't run.
+    const cmd = installInfo && installInfo.prefix ? 'npx attribut update' : 'attribut update';
+    const msg = `update available: ${currentVersion} → ${latest} — run \`${cmd}\``;
     log(msg);
     return msg;
   } catch {
@@ -320,10 +479,17 @@ async function maybeAutoUpdate({
     }
 
     try {
-      exec(['install', '-g', `attribut@${updateTo}`]);
+      // Carry the same --prefix the install already lives under, or npm would
+      // reinstall into the (unwritable, or simply different) system root.
+      const args = ['install', '-g'];
+      if (installInfo.prefix) args.push('--prefix', installInfo.prefix);
+      args.push(`attribut@${updateTo}`);
+      exec(args);
       return { attempted: true, ok: true, reason: `updated ${currentVersion} → ${updateTo}` };
     } catch (e) {
-      return { attempted: true, ok: false, reason: `npm install failed: ${e.message}` };
+      // execFileSync stuffs npm's ENTIRE stderr into e.message — condense it, or
+      // a failed background update dumps ~35 lines into the heartbeat log hourly.
+      return { attempted: true, ok: false, reason: `npm install failed: ${npmFailureReason(e)}` };
     } finally {
       try {
         fs.rmdirSync(lockDir);
@@ -342,9 +508,9 @@ async function maybeAutoUpdate({
  * If the running collector lives in an ephemeral npx/dlx cache, installing
  * hooks against its path would bake a path that npx can prune at any time —
  * the hooks then die silently. Heal by installing this same version durably
- * (`npm i -g attribut@<running version>`) and returning the durable collector
- * path for hook baking. On ANY failure, warn loudly and return the original
- * path (degraded but working-for-now — the old behavior).
+ * and returning the durable collector path for hook baking. On ANY failure,
+ * warn loudly and return the original path (degraded but working-for-now — the
+ * old behavior).
  */
 const durableCache = new Map(); // memo: multi-agent connect heals (or fails) once, not per agent
 function ensureDurableCollector(collectorPath = defaultCollectorPath(), exec = execNpm) {
@@ -352,17 +518,22 @@ function ensureDurableCollector(collectorPath = defaultCollectorPath(), exec = e
   if (durableCache.has(collectorPath)) return durableCache.get(collectorPath);
   log('running from an ephemeral npx cache — installing durably so hooks survive cache pruning…');
   try {
-    exec(['install', '-g', `attribut@${PKG_VERSION}`], { stdio: ['ignore', 'ignore', 'inherit'] });
-    const durable = globalCollectorPath(exec);
-    if (!fs.existsSync(durable)) throw new Error(`expected collector missing at ${durable}`);
-    log(`installed globally — hooks will use ${durable}`);
-    durableCache.set(collectorPath, durable);
-    return durable;
+    const { collector, prefix } = installDurably(PKG_VERSION, exec);
+    if (prefix) {
+      // The system npm prefix was root-owned; we installed under ~/.attribut
+      // instead. Hooks and the timer use absolute paths so capture works
+      // either way — PATH only matters for typing `attribut` yourself.
+      log(`the system npm prefix isn't writable — installed under ${prefix} instead.`);
+      log(`add ${prefixBinDir(prefix)} to PATH to run \`attribut\` directly.`);
+    }
+    log(`installed durably — hooks will use ${collector}`);
+    durableCache.set(collectorPath, collector);
+    return collector;
   } catch (e) {
-    log(`WARNING: could not install globally (${e.message}).`);
+    log(`WARNING: could not install durably (${e.message}).`);
     log('WARNING: hooks will reference the npx cache, which npx may prune — they can');
-    log('WARNING: stop firing without notice. Run `npm install -g attribut` then');
-    log('WARNING: `attribut update` to fix this permanently.');
+    log('WARNING: stop firing without notice. Re-run `npx attribut connect` to retry,');
+    log('WARNING: or install with `sudo npm install -g attribut` and run `attribut update`.');
     durableCache.set(collectorPath, collectorPath);
     return collectorPath;
   }
@@ -464,23 +635,24 @@ async function runUpdate(argv, { exec = execNpm, fetchLatest = fetchLatestVersio
   }
 
   out(`Updating attribut ${PKG_VERSION} → ${target}…`);
+  // installDurably falls back to a user-owned prefix when the system one is
+  // root-owned, and reuses this install's own prefix when it already is one.
+  let durable;
+  let usedPrefix;
   try {
-    exec(['install', '-g', `attribut@${target}`], { stdio: ['ignore', 'inherit', 'inherit'] });
+    ({ collector: durable, prefix: usedPrefix } = installDurably(target, exec, { prefix: info.prefix }));
   } catch (e) {
     log(`npm install failed: ${e.message}`);
     return 1;
   }
+  if (usedPrefix && !info.prefix) {
+    out(`The system npm prefix isn't writable — installed under ${usedPrefix}.`);
+    out(`Add ${prefixBinDir(usedPrefix)} to PATH to run \`attribut\` directly.`);
+  }
 
-  // If the running collector isn't the durable global one (npx heal, manager
+  // If the running collector isn't the durable one (npx heal, manager
   // migration), the hooks still point at the OLD path — re-bake them from the
   // freshly installed package so they reference the durable location.
-  let durable;
-  try {
-    durable = globalCollectorPath(exec);
-  } catch (e) {
-    log(`could not resolve the npm global root: ${e.message}`);
-    return 1;
-  }
   if (durable !== defaultCollectorPath()) {
     out('Re-pointing hooks at the durable install…');
     try {
@@ -508,6 +680,9 @@ module.exports = {
   maybeNotifyUpdate,
   maybeAutoUpdate,
   ensureDurableCollector,
+  installDurably,
+  fallbackPrefixDir,
+  isWritableTarget,
   globalCollectorPath,
   autoUpdateOptOutPath,
   runUpdate,
