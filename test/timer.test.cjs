@@ -50,6 +50,20 @@ test('resolveHeartbeatArgv for an ephemeral npx cache falls back to `npx -y attr
   assert.deepEqual(argv, ['npx', '-y', 'attribut@latest', 'heartbeat']);
 });
 
+test('resolveHeartbeatArgv defaults to the HEALED collector path, not the npx cache', () => {
+  const installer = require('../src/install.cjs');
+  const real = installer.hookCollectorPath;
+  const healed = '/home/u/.attribut/npm/lib/node_modules/attribut/src/collector.cjs';
+  installer.hookCollectorPath = () => healed;
+  try {
+    // `npx attribut connect` heals the hooks onto a durable install; the timer
+    // must bake that same path instead of re-resolving attribut@latest hourly.
+    assert.deepEqual(timer.resolveHeartbeatArgv(), [process.execPath, healed, 'heartbeat']);
+  } finally {
+    installer.hookCollectorPath = real;
+  }
+});
+
 test('isEphemeralInstall recognizes an npx cache path but not a normal global install', () => {
   assert.equal(
     timer.isEphemeralInstall('/home/u/.npm/_npx/deadbeef/node_modules/attribut/src/collector.cjs'),

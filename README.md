@@ -312,6 +312,13 @@ that predate the heal are fixed by one `attribut update`, which re-bakes every
 registered hook and the heartbeat timer (`attribut install --rebake` under the
 hood).
 
+Where the system npm prefix is root-owned — the default on a distro-packaged
+Node, so a plain `npm i -g` is `EACCES` for a normal user — the heal installs
+under `~/.attribut/npm` rather than demanding sudo, and every later update
+keeps that prefix. Hooks and the heartbeat timer bake absolute paths, so
+capture works whether or not `~/.attribut/npm/bin` is on your `PATH`; add it
+if you want to type `attribut` yourself.
+
 The **ingest token is never written into the hook command or `settings.json`** —
 that would leave it world-readable and expose it in `ps`. Instead it is persisted
 to `${ATTRIBUT_CONFIG_DIR:-~/.attribut}/token` (mode `0600`) and read back by the
@@ -466,9 +473,9 @@ The collector logs every action to **stderr** prefixed with `[attribut]`, and
 - **Verify offline**, without posting, using `--parse` / `--dry-run` (above).
 - **Hooks silently stopped firing**, or your hook commands reference a path
   under `~/.npm/_npx/…`: an old install baked an ephemeral npx cache path that
-  npx has since pruned (fixed in v1.1.0). Run `npm i -g attribut` then
-  `attribut update` — it re-bakes every hook and the heartbeat timer onto the
-  durable install.
+  npx has since pruned (fixed in v1.1.0). Re-run `npx attribut connect` — it
+  installs durably (under `~/.attribut/npm` if the system prefix is root-owned)
+  and re-bakes every hook and the heartbeat timer onto that path.
 - After installing, **restart any running sessions** (Claude Code, Codex,
   Cursor, Antigravity) to pick up the hook.
 

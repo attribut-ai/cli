@@ -12,6 +12,8 @@ npm i -g attribut
 
 Install globally rather than running it via `npx`. The capture hook invokes the installed program by its absolute path and needs its dependencies on disk, so it must live in a durable location — an ephemeral `npx` copy disappears and the hook breaks. (The one exception is the cloud one-liner below, which pins a version.)
 
+If that command fails with `EACCES` — common on Linux, where the global npm folder belongs to root — run `npx attribut connect` instead. It installs itself durably under `~/.attribut/npm`, no sudo needed. Add `~/.attribut/npm/bin` to your `PATH` to run `attribut` by name afterwards.
+
 ## Connect (recommended)
 
 Run `connect` and follow the prompts:

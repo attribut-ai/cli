@@ -19,6 +19,8 @@ const tokenStore = require('../src/token.cjs');
 const { readState, writeState } = require('../src/state.cjs');
 const { version: PKG_VERSION } = require('../package.json');
 
+const IS_WIN = process.platform === 'win32';
+
 // Env the update paths are gated on — cleared per test, restored after. CI in
 // particular is set on GitHub runners and would short-circuit every attempt.
 const GATED_ENV = [
@@ -108,6 +110,141 @@ test('detectInstall classifies the install shape from the collector path', () =>
   assert.equal(update.detectInstall('/Users/x/Code/cli/src/collector.cjs').packageDir, null);
 });
 
+test('detectInstall flags an install that lives under our own npm prefix', () => {
+  const under = path.join(update.fallbackPrefixDir(), 'lib', 'node_modules', 'attribut', 'src', 'collector.cjs');
+  assert.equal(update.detectInstall(under).kind, 'npm-global');
+  assert.equal(update.detectInstall(under).prefix, update.fallbackPrefixDir());
+  assert.equal(update.detectInstall('/usr/local/lib/node_modules/attribut/src/collector.cjs').prefix, null);
+});
+
+// ---- installDurably (npm prefix fallback) ---------------------------------
+
+// Verbatim shape of what npm prints when /usr/local/lib/node_modules is
+// root-owned — the default on a distro-packaged Node.
+const EACCES_STDERR = [
+  'npm ERR! code EACCES',
+  'npm ERR! syscall mkdir',
+  "npm ERR! path /usr/local/lib/node_modules",
+  'npm ERR! errno -13',
+  "npm ERR! Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules'",
+  'npm ERR! A complete log of this run can be found in: /home/u/.npm/_logs/x.log',
+].join('\n');
+
+/**
+ * A fake npm: answers `root -g` (honouring --prefix), and on `install -g`
+ * either creates the package tree in the matching root or throws with the
+ * supplied stderr when no --prefix was passed.
+ */
+function fakeNpm({ globalRoot, failGlobalWith = null }) {
+  const calls = [];
+  // A prefix root is computed, never asked for — npm redacts its own output.
+  const rootFor = (prefix) => (prefix ? path.join(prefix, 'lib', 'node_modules') : globalRoot);
+  const exec = (args) => {
+    calls.push(args.join(' '));
+    const pi = args.indexOf('--prefix');
+    const prefix = pi === -1 ? null : args[pi + 1];
+    if (args[0] === 'root') return `${rootFor(prefix)}\n`;
+    if (args[0] === 'install') {
+      if (!prefix && failGlobalWith) {
+        const e = new Error('Command failed: npm install -g attribut@9.9.9');
+        e.stderr = failGlobalWith;
+        throw e;
+      }
+      fs.mkdirSync(path.join(rootFor(prefix), 'attribut', 'src'), { recursive: true });
+      fs.writeFileSync(path.join(rootFor(prefix), 'attribut', 'src', 'collector.cjs'), '');
+      return '';
+    }
+    return '';
+  };
+  return { exec, calls };
+}
+
+test('installDurably uses the real global root when it is writable', { skip: IS_WIN }, () => {
+  const globalRoot = path.join(tmpDir, 'usr-local', 'lib', 'node_modules');
+  fs.mkdirSync(globalRoot, { recursive: true });
+  const { exec, calls } = fakeNpm({ globalRoot });
+
+  const r = update.installDurably('9.9.9', exec);
+  assert.equal(r.prefix, null);
+  assert.equal(r.collector, path.join(globalRoot, 'attribut', 'src', 'collector.cjs'));
+  assert.equal(calls.includes('install -g attribut@9.9.9'), true);
+  assert.equal(calls.some((c) => c.includes('--prefix')), false, 'no fallback when global works');
+});
+
+test('installDurably falls back to a user-owned prefix on EACCES', { skip: IS_WIN }, () => {
+  const globalRoot = path.join(tmpDir, 'usr-local', 'lib', 'node_modules');
+  fs.mkdirSync(globalRoot, { recursive: true });
+  const { exec, calls } = fakeNpm({ globalRoot, failGlobalWith: EACCES_STDERR });
+
+  const r = update.installDurably('9.9.9', exec);
+  const prefix = update.fallbackPrefixDir();
+  assert.equal(r.prefix, prefix);
+  assert.equal(r.collector, path.join(prefix, 'lib', 'node_modules', 'attribut', 'src', 'collector.cjs'));
+  assert.equal(fs.existsSync(r.collector), true, 'collector actually landed');
+  assert.equal(calls.includes(`install -g --prefix ${prefix} attribut@9.9.9`), true);
+});
+
+test('installDurably surfaces a non-permission npm failure as one line', { skip: IS_WIN }, () => {
+  const globalRoot = path.join(tmpDir, 'usr-local', 'lib', 'node_modules');
+  fs.mkdirSync(globalRoot, { recursive: true });
+  const e404 = 'npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/attribut\nnpm ERR! A complete log…';
+  const { exec, calls } = fakeNpm({ globalRoot, failGlobalWith: e404 });
+
+  assert.throws(() => update.installDurably('9.9.9', exec), (err) => {
+    assert.match(err.message, /E404/);
+    assert.equal(err.message.includes('\n'), false, 'one line, not npm\'s wall');
+    return true;
+  });
+  assert.equal(calls.some((c) => c.includes('--prefix')), false, 'a 404 is not retried elsewhere');
+});
+
+test('installDurably honours an explicit prefix and never probes global', { skip: IS_WIN }, () => {
+  const { exec, calls } = fakeNpm({ globalRoot: path.join(tmpDir, 'unused') });
+  const prefix = path.join(tmpDir, 'my-prefix');
+
+  const r = update.installDurably('9.9.9', exec, { prefix });
+  assert.equal(r.prefix, prefix);
+  assert.deepEqual(calls, [`install -g --prefix ${prefix} attribut@9.9.9`], 'one npm call, no root probe');
+});
+
+test('installDurably skips the global attempt when the global root is not writable', { skip: IS_WIN }, () => {
+  if (process.getuid && process.getuid() === 0) return; // root can write anywhere
+  const locked = path.join(tmpDir, 'locked');
+  fs.mkdirSync(locked, { recursive: true });
+  fs.chmodSync(locked, 0o555);
+  try {
+    const { exec, calls } = fakeNpm({ globalRoot: path.join(locked, 'lib', 'node_modules') });
+    const r = update.installDurably('9.9.9', exec);
+    assert.equal(r.prefix, update.fallbackPrefixDir());
+    assert.equal(calls.includes('install -g attribut@9.9.9'), false, 'never spews npm EACCES at the user');
+  } finally {
+    fs.chmodSync(locked, 0o755);
+  }
+});
+
+test('ensureDurableCollector heals an npx path onto a writable prefix', { skip: IS_WIN }, () => {
+  const globalRoot = path.join(tmpDir, 'usr-local', 'lib', 'node_modules');
+  fs.mkdirSync(globalRoot, { recursive: true });
+  const { exec } = fakeNpm({ globalRoot, failGlobalWith: EACCES_STDERR });
+  // Unique per run — ensureDurableCollector memoizes by input path.
+  const npxPath = path.join(tmpDir, '_npx', 'abc', 'node_modules', 'attribut', 'src', 'collector.cjs');
+
+  const healed = update.ensureDurableCollector(npxPath, exec);
+  assert.equal(
+    healed,
+    path.join(update.fallbackPrefixDir(), 'lib', 'node_modules', 'attribut', 'src', 'collector.cjs')
+  );
+  assert.equal(update.ensureDurableCollector(npxPath, exec), healed, 'memoized');
+});
+
+test('ensureDurableCollector falls back to the npx path when nothing installs', { skip: IS_WIN }, () => {
+  const npxPath = path.join(tmpDir, '_npx', 'def', 'node_modules', 'attribut', 'src', 'collector.cjs');
+  const dead = () => {
+    throw new Error('npm is gone');
+  };
+  assert.equal(update.ensureDurableCollector(npxPath, dead), npxPath, 'degraded, never fatal');
+});
+
 // ---- maybeAutoUpdate guardrails -------------------------------------------
 
 test('maybeAutoUpdate skips invalid, equal, opted-out, CI, and non-npm targets', async () => {
@@ -146,8 +283,6 @@ test('maybeAutoUpdate skips invalid, equal, opted-out, CI, and non-npm targets',
   assert.equal(calls.length, 0, 'no guard may reach npm');
 });
 
-const IS_WIN = process.platform === 'win32';
-
 test('maybeAutoUpdate runs a pinned install and records the attempt', { skip: IS_WIN }, async () => {
   const calls = [];
   const r = await update.maybeAutoUpdate({
@@ -159,6 +294,20 @@ test('maybeAutoUpdate runs a pinned install and records the attempt', { skip: IS
   assert.deepEqual(calls, [['install', '-g', 'attribut@99.0.0']]);
   assert.equal(readState().auto_update.target, '99.0.0');
   assert.equal(fs.existsSync(path.join(tmpDir, 'update.lock')), false, 'lock released');
+});
+
+test('maybeAutoUpdate keeps a prefix install in its own prefix', { skip: IS_WIN }, async () => {
+  const prefix = update.fallbackPrefixDir();
+  const packageDir = path.join(prefix, 'lib', 'node_modules', 'attribut');
+  fs.mkdirSync(packageDir, { recursive: true });
+  const calls = [];
+  const r = await update.maybeAutoUpdate({
+    updateTo: '99.0.0',
+    exec: (args) => calls.push(args),
+    installInfo: { kind: 'npm-global', packageDir, prefix },
+  });
+  assert.equal(r.ok, true);
+  assert.deepEqual(calls, [['install', '-g', '--prefix', prefix, 'attribut@99.0.0']]);
 });
 
 test('maybeAutoUpdate converges DOWN too (server rollback pin)', { skip: IS_WIN }, async () => {

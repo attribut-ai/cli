@@ -69,8 +69,15 @@ function isEphemeralInstall(collectorPath) {
  * launchd/systemd/schtasks environment hands a job. Falls back to `npx -y
  * attribut@latest heartbeat` only when the running install is itself an
  * ephemeral npx cache (see isEphemeralInstall).
+ *
+ * Defaults to hookCollectorPath(), NOT collectorPath(): under `npx attribut
+ * connect` the hooks have already been healed onto a durable install and the
+ * timer must bake that same path. The raw path would leave the hourly job
+ * re-resolving `attribut@latest` from the registry forever — drifting to a
+ * different version than the hooks run, and needing npx on the sparse PATH
+ * systemd hands a user unit. Memoized in update.cjs, so no second npm install.
  */
-function resolveHeartbeatArgv(collectorPath = installer.collectorPath()) {
+function resolveHeartbeatArgv(collectorPath = installer.hookCollectorPath()) {
   if (!isEphemeralInstall(collectorPath)) {
     return [process.execPath, collectorPath, 'heartbeat'];
   }
