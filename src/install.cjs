@@ -781,6 +781,7 @@ function runRebake() {
 
 module.exports = {
   collectorPath,
+  hookCollectorPath,
   parseArgs,
   shquote,
   buildHookCommand,
