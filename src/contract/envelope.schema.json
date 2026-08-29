@@ -6,8 +6,8 @@
   "required": ["provider", "tool", "schema_version", "payload"],
   "additionalProperties": false,
   "properties": {
-    "provider": { "enum": ["anthropic", "openai", "google", "cursor"] },
-    "tool": { "enum": ["claude_code", "codex", "antigravity", "cursor"] },
+    "provider": { "enum": ["anthropic", "openai", "google", "cursor", "xai"] },
+    "tool": { "enum": ["claude_code", "codex", "antigravity", "cursor", "grok"] },
     "schema_version": { "type": "integer", "enum": [1] },
     "_trigger": { "enum": ["sessionend", "stop", "posttooluse", "backfill"] },
     "_source": { "enum": ["cli", "cowork"] },
@@ -31,6 +31,10 @@
     {
       "if": { "properties": { "tool": { "const": "cursor" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/cursorPayload" } } }
+    },
+    {
+      "if": { "properties": { "tool": { "const": "grok" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/grokPayload" } } }
     }
   ],
   "$defs": {
@@ -412,6 +416,108 @@
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
                   "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+                  "branch": { "type": ["string", "null"], "maxLength": 256 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "grokPayload": {
+      "type": "object",
+      "required": ["sessionId"],
+      "additionalProperties": false,
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "device_uuid": { "type": ["string", "null"], "maxLength": 64 },
+        "title": { "type": ["string", "null"], "maxLength": 200 },
+        "model": { "type": ["string", "null"], "maxLength": 128 },
+        "tokens_in": { "type": ["integer", "null"], "minimum": 0 },
+        "tokens_out": { "type": ["integer", "null"], "minimum": 0 },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "ended_at": { "type": ["string", "null"], "format": "date-time" },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "repo": { "type": ["string", "null"], "maxLength": 2000 },
+        "branch": { "type": ["string", "null"], "maxLength": 256 },
+        "commitSHA": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
+        "num_turns": { "type": ["integer", "null"], "minimum": 0 },
+        "num_tool_calls": { "type": ["integer", "null"], "minimum": 0 },
+        "tool_uses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "maxLength": 128 },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "lines_code_added": { "type": ["integer", "null"], "minimum": 0 },
+        "lines_comment_added": { "type": ["integer", "null"], "minimum": 0 },
+        "lines_blank_added": { "type": ["integer", "null"], "minimum": 0 },
+        "lines_code_removed": { "type": ["integer", "null"], "minimum": 0 },
+        "lines_comment_removed": { "type": ["integer", "null"], "minimum": 0 },
+        "lines_blank_removed": { "type": ["integer", "null"], "minimum": 0 },
+        "added_char_n": { "type": ["integer", "null"], "minimum": 0 },
+        "added_char_sum": { "type": ["integer", "null"], "minimum": 0 },
+        "added_char_sumsq": { "type": ["integer", "null"], "minimum": 0 },
+        "grok": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cache_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
+            "cache_creation_tokens": { "type": ["integer", "null"], "minimum": 0 },
+            "reasoning_output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+            "effort": { "type": ["string", "null"], "maxLength": 128 },
+            "version": { "type": ["string", "null"], "maxLength": 128 },
+            "reason": { "type": ["string", "null"], "maxLength": 128 },
+            "remoteSessionId": { "type": ["string", "null"], "maxLength": 128 },
+            "context_tokens": { "type": ["integer", "null"], "minimum": 0 },
+            "context_token_limit": { "type": ["integer", "null"], "minimum": 0 },
+            "cost_usd_ticks": { "type": ["integer", "null"], "minimum": 0 },
+            "subagents": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "agent_type": { "type": ["string", "null"], "maxLength": 128 },
+                  "role": { "type": ["string", "null"], "maxLength": 128 },
+                  "model": { "type": ["string", "null"], "maxLength": 128 },
+                  "status": { "type": ["string", "null"], "maxLength": 128 },
+                  "tool_uses": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "count"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": { "type": "string", "maxLength": 128 },
+                        "count": { "type": "integer", "minimum": 0 }
+                      }
+                    }
+                  },
+                  "tool_use_count": { "type": ["integer", "null"], "minimum": 0 },
+                  "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
+                  "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+                  "cache_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
+                  "cache_creation_tokens": { "type": ["integer", "null"], "minimum": 0 },
+                  "started_at": { "type": ["string", "null"], "format": "date-time" },
+                  "ended_at": { "type": ["string", "null"], "format": "date-time" },
+                  "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_added": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_code_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_comment_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "lines_blank_removed": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_n": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sum": { "type": ["integer", "null"], "minimum": 0 },
+                  "added_char_sumsq": { "type": ["integer", "null"], "minimum": 0 },
                   "commit_shas": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" } },
                   "branch": { "type": ["string", "null"], "maxLength": 256 }
                 }
