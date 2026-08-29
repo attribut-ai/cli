@@ -1,0 +1,8 @@
+{"type":"turn_started","timestamp":"2026-08-29T10:00:05.000Z"}
+{"type":"tool_started","tool_name":"bash","tool_input":{"command":"SECRET_EVENTS_TOOL_ARG"}}
+{"type":"tool_completed","tool_name":"bash","tool_output":"SECRET_EVENTS_TOOL_OUTPUT"}
+{"type":"tool_started","tool_name":"read_file","tool_input":{"path":"/secret"}}
+{"type":"tool_completed","tool_name":"read_file"}
+{"type":"turn_ended","timestamp":"2026-08-29T10:00:40.000Z"}
+{"type":"turn_started","timestamp":"2026-08-29T10:00:41.000Z"}
+{"type":"turn_ended","timestamp":"2026-08-29T10:01:30.000Z"}

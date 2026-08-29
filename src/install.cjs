@@ -26,20 +26,28 @@ const settings = require('./settings.cjs');
 const settingsAgy = require('./settings_agy.cjs');
 const settingsCodex = require('./settings_codex.cjs');
 const settingsCursor = require('./settings_cursor.cjs');
+const settingsGrok = require('./settings_grok.cjs');
 const tokenStore = require('./token.cjs');
 const updater = require('./update.cjs');
 
 // Providers this installer can register. 'anthropic' = Claude Code (settings.json
 // hooks); 'antigravity' = Google Antigravity (~/.gemini/config/hooks.json);
 // 'openai' = Codex (~/.codex/config.toml array-of-tables hooks); 'cursor' =
-// Cursor (~/.cursor/hooks.json event-keyed hooks).
-const PROVIDERS = new Set(['anthropic', 'antigravity', 'openai', 'cursor']);
+// Cursor (~/.cursor/hooks.json event-keyed hooks); 'xai' = Grok Build
+// (~/.grok/hooks/attribut.json, dedicated file — never Claude/Cursor settings).
+const PROVIDERS = new Set(['anthropic', 'antigravity', 'openai', 'cursor', 'xai']);
 const DEFAULT_PROVIDER = 'anthropic';
 
 // Map an agent slug (the device-flow / server vocabulary: claude_code, agy,
-// codex, cursor, …) to the provider this installer knows how to wire up. Only
+// codex, cursor, grok, …) to the provider this installer knows how to wire up. Only
 // agents with a hook installer appear here — `attribut connect` offers exactly these.
-const AGENT_PROVIDER = { claude_code: 'anthropic', agy: 'antigravity', codex: 'openai', cursor: 'cursor' };
+const AGENT_PROVIDER = {
+  claude_code: 'anthropic',
+  agy: 'antigravity',
+  codex: 'openai',
+  cursor: 'cursor',
+  grok: 'xai',
+};
 
 /** The agents `connect` can actually install hooks for, in display order. */
 const INSTALLABLE_AGENTS = Object.keys(AGENT_PROVIDER);
@@ -207,6 +215,23 @@ function isOurCursorEntry(collector) {
 }
 
 /**
+ * Build the Grok attribut.json spec: Claude-compatible nested command hooks for
+ * Stop + SessionEnd, each running the collector with `--provider xai <mode>`.
+ * Dedicated file under ~/.grok/hooks/ — not merged into Claude or Cursor settings.
+ */
+function buildGrokHookSpecs({ collector, ingestBase }) {
+  const mk = (mode) => ({
+    type: 'command',
+    command: buildHookCommand(mode, { collector, ingestBase, provider: 'xai' }),
+    timeout: 30,
+  });
+  return {
+    Stop: [{ hooks: [mk('stop')], _dedupeKey: collector }],
+    SessionEnd: [{ hooks: [mk('sessionend')], _dedupeKey: collector }],
+  };
+}
+
+/**
  * Build the hooks map merged into settings.json. Each entry carries a private
  * `_dedupeKey` (the collector path) so mergeHooks replaces our own entries in
  * place without disturbing unrelated user hooks.
@@ -263,7 +288,8 @@ Usage:
   --endpoint=<origin>  Override the ingest origin (default: https://ingest.attribut.ai).
                        The collector posts to <origin>/v1/hook.
   --provider <agent>   Which agent to install for: anthropic (Claude Code, default),
-                       openai (Codex), cursor (Cursor), antigravity (Antigravity).
+                       openai (Codex), cursor (Cursor), antigravity (Antigravity),
+                       xai (Grok Build).
   -h, --help           Show this help.
 
 For Claude Code, registers PostToolUse(Bash) + SessionEnd + Stop hooks in
@@ -282,10 +308,10 @@ Usage:
   attribut uninstall --provider <agent> just one agent
 
 With NO --provider, this fully disconnects the device: it strips ATTRIBUT's hooks
-from EVERY agent (Claude Code, Codex, Cursor, Antigravity), deletes legacy collector
+from EVERY agent (Claude Code, Codex, Cursor, Antigravity, Grok), deletes legacy collector
 files, drops the stored token(s), and removes the hourly heartbeat timer.
 
-With --provider <agent> (anthropic | openai | cursor | antigravity), it scopes to
+With --provider <agent> (anthropic | openai | cursor | antigravity | xai), it scopes to
 that one agent — removing just its hooks and revoking just its token, leaving the
 other agents and the heartbeat timer connected.
 
@@ -401,6 +427,25 @@ function runInstall(argv) {
     return 0;
   }
 
+  if (provider === 'xai') {
+    let applied;
+    try {
+      const specs = buildGrokHookSpecs({ collector, ingestBase });
+      applied = settingsGrok.applyGrokHooks(specs, settingsGrok.grokHooksPath(), isOurCommand);
+    } catch (e) {
+      err(`Could not write hooks to ${settingsGrok.grokHooksPath()}: ${e.message}`);
+      return 1;
+    }
+    if (applied.backupPath) out(`  Backed up previous hooks → ${applied.backupPath}`);
+    out(`Registered Stop + SessionEnd hooks in ${applied.settingsPath}`);
+    out(`  collector → ${collector}`);
+    out(`  token     → ${tokenFile} (mode 0600)`);
+    out('');
+    out('Grok Build will now capture session attribution to ATTRIBUT.');
+    out('  (Restart any running Grok sessions to pick up the hook.)');
+    return 0;
+  }
+
   const p = settings.settingsPath();
   let applied;
   try {
@@ -492,6 +537,13 @@ function uninstallProviders() {
       path: () => settingsAgy.agyHooksPath(),
       remove: () => settingsAgy.applyAgyUninstall(),
     },
+    {
+      provider: 'xai',
+      name: 'Grok',
+      agent: 'grok',
+      path: () => settingsGrok.grokHooksPath(),
+      remove: () => settingsGrok.applyGrokUninstall(),
+    },
   ];
 }
 
@@ -499,7 +551,7 @@ function uninstallProviders() {
  * `attribut uninstall [--provider <agent>]`. Returns an exit code.
  *
  * With NO `--provider`, this is a FULL disconnect: it strips ATTRIBUT's hooks
- * from EVERY agent (Claude Code, Codex, Cursor, Antigravity), removes legacy
+ * from EVERY agent (Claude Code, Codex, Cursor, Antigravity, Grok), removes legacy
  * collector files, drops the whole token store, and removes the device-level
  * heartbeat timer. (Previously the no-flag path removed only Claude's hooks
  * while still dropping every agent's token and the timer — leaving the other
@@ -667,6 +719,10 @@ function registerAgent({ agent, token, ingestBase }) {
     const specs = buildCursorHookSpecs({ collector, ingestBase: base });
     return settingsCursor.applyCursorHooks(specs, isOurCursorEntry(collector));
   }
+  if (provider === 'xai') {
+    const specs = buildGrokHookSpecs({ collector, ingestBase: base });
+    return settingsGrok.applyGrokHooks(specs, settingsGrok.grokHooksPath(), isOurCommand);
+  }
   const hooksMap = buildHooksMap({ collector, ingestBase: base });
   return settings.applyHooks(hooksMap, settings.settingsPath(), isOurCommand);
 }
@@ -751,6 +807,16 @@ function runRebake() {
           isOurCommandAnyInstall
         ),
     },
+    {
+      name: 'grok',
+      file: settingsGrok.grokHooksPath(),
+      apply: (ingestBase) =>
+        settingsGrok.applyGrokHooks(
+          buildGrokHookSpecs({ collector, ingestBase }),
+          settingsGrok.grokHooksPath(),
+          isOurCommandAnyInstall
+        ),
+    },
   ];
 
   for (const p of providers) {
@@ -789,6 +855,7 @@ module.exports = {
   buildAgyHookSpec,
   buildCodexHookSpecs,
   buildCursorHookSpecs,
+  buildGrokHookSpecs,
   isOurCodexEntry,
   isOurCursorEntry,
   isOurCommand,

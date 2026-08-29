@@ -33,6 +33,7 @@ const GATED_ENV = [
   'AGY_HOOKS_PATH',
   'CODEX_CONFIG_PATH',
   'CURSOR_HOOKS_PATH',
+  'GROK_HOOKS_PATH',
   'ATTRIBUT_LAUNCHD_DIR',
   'ATTRIBUT_SYSTEMD_USER_DIR',
   'ATTRIBUT_SKIP_TIMER_ACTIVATION',
@@ -56,6 +57,7 @@ beforeEach(() => {
   process.env.AGY_HOOKS_PATH = path.join(tmpDir, 'agy-hooks.json');
   process.env.CODEX_CONFIG_PATH = path.join(tmpDir, 'codex-config.toml');
   process.env.CURSOR_HOOKS_PATH = path.join(tmpDir, 'cursor-hooks.json');
+  process.env.GROK_HOOKS_PATH = path.join(tmpDir, 'grok-attribut.json');
   process.env.ATTRIBUT_LAUNCHD_DIR = path.join(tmpDir, 'launchd');
   process.env.ATTRIBUT_SYSTEMD_USER_DIR = path.join(tmpDir, 'systemd');
 });

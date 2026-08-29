@@ -1,0 +1,14 @@
+{
+  "contextTokensUsed": 32000,
+  "contextWindowTokens": 256000,
+  "contextWindowUsage": 0.125,
+  "toolCallCount": 2,
+  "toolsUsed": ["bash", "read_file"],
+  "modelsUsed": ["grok-4.6"],
+  "primaryModelId": "grok-4.6",
+  "sessionDurationSeconds": 90,
+  "agentLinesAdded": 10,
+  "agentLinesRemoved": 2,
+  "gitCommitCount": 1,
+  "turnCount": 2
+}
