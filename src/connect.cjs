@@ -45,7 +45,13 @@ const DEFAULT_INGEST_BASE = 'https://ingest.attribut.ai';
 
 // The agents `connect` can actually wire up, in display order. Sourced from the
 // installer so the two never drift (claude_code, agy today).
-const AGENT_LABELS = { claude_code: 'Claude Code', agy: 'Antigravity (Gemini)', codex: 'Codex', cursor: 'Cursor' };
+const AGENT_LABELS = {
+  claude_code: 'Claude Code',
+  agy: 'Antigravity (Gemini)',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  grok: 'Grok Build',
+};
 const AGENTS = installer.INSTALLABLE_AGENTS.map((slug) => ({
   slug,
   label: AGENT_LABELS[slug] || slug,
