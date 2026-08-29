@@ -168,8 +168,8 @@ test('scan: sinceMs in the future windows out everything; sinceMs=null keeps it'
   }
 });
 
-test('AGENT_SLUGS exposes the four supported agents', () => {
-  assert.deepEqual([...AGENT_SLUGS].sort(), ['agy', 'claude_code', 'codex', 'cursor']);
+test('AGENT_SLUGS exposes the supported agents', () => {
+  assert.deepEqual([...AGENT_SLUGS].sort(), ['agy', 'claude_code', 'codex', 'cursor', 'grok']);
 });
 
 // =============================================================================

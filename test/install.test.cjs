@@ -40,6 +40,7 @@ function sandboxOtherAgents() {
     CODEX_CONFIG_PATH: 'config.toml',
     CURSOR_HOOKS_PATH: 'hooks.json',
     AGY_HOOKS_PATH: 'agy-hooks.json',
+    GROK_HOOKS_PATH: 'grok-attribut.json',
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribut-agents-'));
   const prev = {};
@@ -58,7 +59,7 @@ function sandboxOtherAgents() {
 /**
  * Run `fn(dir)` with every agent's config path, the token/config/legacy dirs, and
  * the timer dirs pointed into one fresh tmp dir (timer activation skipped). Used
- * by the multi-agent uninstall tests so installing/removing all four agents never
+ * by the multi-agent uninstall tests so installing/removing all agents never
  * escapes the sandbox. Restores all touched env vars afterwards.
  */
 function withSandbox(fn) {
@@ -67,6 +68,7 @@ function withSandbox(fn) {
     'CODEX_CONFIG_PATH',
     'CURSOR_HOOKS_PATH',
     'AGY_HOOKS_PATH',
+    'GROK_HOOKS_PATH',
     'ATTRIBUT_CONFIG_DIR',
     'ATTRIBUT_HOOKS_DIR',
     'ATTRIBUT_LAUNCHD_DIR',
@@ -82,6 +84,7 @@ function withSandbox(fn) {
   process.env.CODEX_CONFIG_PATH = path.join(dir, 'codex-config.toml');
   process.env.CURSOR_HOOKS_PATH = path.join(dir, 'cursor-hooks.json');
   process.env.AGY_HOOKS_PATH = path.join(dir, 'agy-hooks.json');
+  process.env.GROK_HOOKS_PATH = path.join(dir, 'grok-attribut.json');
   process.env.ATTRIBUT_CONFIG_DIR = configDir;
   process.env.ATTRIBUT_HOOKS_DIR = path.join(dir, 'claude-hooks');
   process.env.ATTRIBUT_LAUNCHD_DIR = path.join(dir, 'launchd');
@@ -394,17 +397,19 @@ test('readSettings throws on malformed JSON (never clobbers)', () => {
 
 test('uninstall (no --provider) fully disconnects EVERY agent, not just Claude', () => {
   withSandbox((dir) => {
-    // Connect all four agents.
+    // Connect every agent.
     assert.equal(install.runInstall(['--provider', 'anthropic', '--key=tok-a']), 0);
     assert.equal(install.runInstall(['--provider', 'openai', '--key=tok-o']), 0);
     assert.equal(install.runInstall(['--provider', 'cursor', '--key=tok-c']), 0);
     assert.equal(install.runInstall(['--provider', 'antigravity', '--key=tok-g']), 0);
+    assert.equal(install.runInstall(['--provider', 'xai', '--key=tok-x']), 0);
 
     const files = [
       process.env.CLAUDE_SETTINGS_PATH,
       process.env.CODEX_CONFIG_PATH,
       process.env.CURSOR_HOOKS_PATH,
       process.env.AGY_HOOKS_PATH,
+      process.env.GROK_HOOKS_PATH,
     ];
     for (const f of files) {
       assert.match(fs.readFileSync(f, 'utf8'), /collector\.cjs/, `${f} has our hook before uninstall`);
@@ -416,6 +421,7 @@ test('uninstall (no --provider) fully disconnects EVERY agent, not just Claude',
     assert.equal(install.runUninstall([]), 0);
 
     for (const f of files) {
+      if (!fs.existsSync(f)) continue; // grok uninstall deletes attribut.json
       assert.ok(
         !fs.readFileSync(f, 'utf8').includes('collector.cjs'),
         `${f} must have NO orphaned ATTRIBUT hook after full uninstall`

@@ -41,6 +41,7 @@ const agyParser = require('./parser/antigravity_cli.cjs');
 const agyTokens = require('./parser/antigravity_tokens.cjs');
 const codexParser = require('./parser/codex.cjs');
 const cursorParser = require('./parser/cursor.cjs');
+const grokParser = require('./parser/grok.cjs');
 const { buildAndValidate } = require('./envelope.cjs');
 const { getOrCreateDeviceUuid, configDir } = require('./device.cjs');
 const { readToken } = require('./token.cjs');
@@ -82,6 +83,7 @@ function agentForProvider(provider) {
   if (provider === 'antigravity') return 'agy';
   if (provider === 'openai') return 'codex';
   if (provider === 'cursor') return 'cursor';
+  if (provider === 'xai') return 'grok';
   return provider || 'claude_code';
 }
 
@@ -102,18 +104,61 @@ function readStdin() {
   });
 }
 
-// Map a Claude Code hook_event_name (or explicit arg) to the contract _trigger.
+// Map a hook event name (or explicit arg) to the contract _trigger. Accepts
+// Claude PascalCase, Cursor camelCase, and Grok's lowercase event values.
 function triggerFor(hookEventName, explicit) {
   if (explicit) return explicit;
-  switch (hookEventName) {
-    case 'SessionEnd':
+  switch (String(hookEventName || '').toLowerCase()) {
+    case 'sessionend':
       return 'sessionend';
-    case 'Stop':
+    case 'stop':
       return 'stop';
-    case 'PostToolUse':
+    case 'posttooluse':
       return 'posttooluse';
     default:
       return null;
+  }
+}
+
+function hookEvent(hook) {
+  if (!hook || typeof hook !== 'object') return null;
+  if (typeof hook.hook_event_name === 'string' && hook.hook_event_name) return hook.hook_event_name;
+  if (typeof hook.hookEventName === 'string' && hook.hookEventName) return hook.hookEventName;
+  return null;
+}
+
+function grokSessionId(hook) {
+  if (!hook || typeof hook !== 'object') return null;
+  if (typeof hook.sessionId === 'string' && hook.sessionId) return hook.sessionId;
+  if (typeof hook.session_id === 'string' && hook.session_id) return hook.session_id;
+  return null;
+}
+
+function grokCwd(hook) {
+  if (!hook || typeof hook !== 'object') return null;
+  if (typeof hook.cwd === 'string' && hook.cwd) return hook.cwd;
+  if (typeof hook.workspaceRoot === 'string' && hook.workspaceRoot) return hook.workspaceRoot;
+  return firstWorkspaceRoot(hook);
+}
+
+// Grok stdin is camelCase (`hookEventName`/`sessionId`) and has no Claude
+// transcript_path. A non-xai collector that POSTed it would stamp claude_code.
+function looksLikeGrokStdin(hook) {
+  if (!hook || typeof hook !== 'object') return false;
+  const hasCamel =
+    typeof hook.hookEventName === 'string' || typeof hook.sessionId === 'string';
+  const hasTranscript =
+    (typeof hook.transcript_path === 'string' && hook.transcript_path) ||
+    (typeof hook.transcriptPath === 'string' && hook.transcriptPath);
+  if (hasCamel && !hasTranscript) return true;
+  const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
+  if (!cwd) return false;
+  try {
+    const root = path.resolve(grokParser.sessionsRoot());
+    const abs = path.resolve(grokParser.expandHome(cwd));
+    return abs === root || abs.startsWith(root + path.sep);
+  } catch {
+    return false;
   }
 }
 
@@ -672,6 +717,42 @@ function buildCursorEnvelopeFromHook(hook, { trigger, source }) {
   });
 }
 
+// Build the envelope from a Grok hook object. Grok stdin is camelCase
+// ({ hookEventName, sessionId, cwd, workspaceRoot, reason, lastAssistantMessage }).
+// lastAssistantMessage is NEVER copied. Session files are resolved from
+// sessionId + cwd via the grok parser allowlist. THROWS on parse/validation
+// failure (the caller swallows on the hot path).
+function buildGrokEnvelopeFromHook(hook, { trigger, source }) {
+  const sessionId = grokSessionId(hook);
+  const cwd = grokCwd(hook);
+  const sessionDir = grokParser.resolveSessionDir({
+    sessionId,
+    cwd,
+    sessionDir: hook.sessionDir || hook.session_dir || null,
+  });
+
+  const payload = grokParser.parseGrokSession(sessionDir, {
+    sessionId,
+    repo: cwd,
+    branch: gitCurrentBranch(cwd),
+    device_uuid: getOrCreateDeviceUuid(),
+    reason: hook.reason != null ? hook.reason : null,
+    version: hook.version || hook.cli_version || hook.grok_version || null,
+    remoteSessionId:
+      hook.remoteSessionId || hook.remote_session_id || process.env.GROK_REMOTE_SESSION_ID || null,
+  });
+
+  if (!payload.ended_at) payload.ended_at = new Date().toISOString();
+
+  return buildAndValidate(payload, {
+    _trigger: trigger,
+    _source: source || 'cli',
+    _provider: 'xai',
+    _tool: 'grok',
+    _cli_version: GIT_SHA,
+  });
+}
+
 // The hook triggers the collector understands when invoked on the hot path.
 const RUNTIME_TRIGGERS = ['sessionend', 'stop', 'posttooluse'];
 
@@ -691,7 +772,7 @@ Commands:
                  attribut install --key=<token> [--endpoint=<origin>] [--provider <agent>]
   uninstall    Remove capture hooks. No flag = full disconnect (every agent, token,
                timer); --provider <agent> scopes to one agent.
-                 attribut uninstall [--provider anthropic|openai|cursor|antigravity]
+                 attribut uninstall [--provider anthropic|openai|cursor|antigravity|xai]
   heartbeat    Send a one-off liveness signal (installed hourly by connect)
                  attribut heartbeat [--dry-run]
   audit        Prove metadata-only on your own data: validate every payload
@@ -783,6 +864,8 @@ async function main() {
     } else if (provider === 'cursor') {
       log('--parse is not supported for --provider cursor (Cursor sessions live in state.vscdb, not a transcript file).');
       return 2;
+    } else if (provider === 'xai') {
+      payload = grokParser.parseGrokSession(file, extra);
     } else if (provider === 'anthropic') {
       payload = parser.parseClaudeCodeTranscript(file, extra);
     } else {
@@ -814,9 +897,20 @@ async function main() {
   // throws — see state.cjs.
   if (!dryRun) touchHookInvocation();
 
-  const trigger = triggerFor(hook.hook_event_name, explicit);
+  const trigger = triggerFor(hookEvent(hook), explicit);
   if (!trigger) {
-    log(`unsupported hook_event_name: ${hook.hook_event_name}; nothing to do.`);
+    log(`unsupported hook_event_name: ${hookEvent(hook)}; nothing to do.`);
+    return 0;
+  }
+
+  // Dual-install guard: Grok also loads ~/.claude/settings.json. A Grok Stop/
+  // SessionEnd piped to the Claude (or any non-xai) collector must not POST a
+  // claude_code envelope. Fail open, no POST.
+  if (provider !== 'xai' && looksLikeGrokStdin(hook)) {
+    log(
+      `refusing Grok stdin on ${provider} collector ` +
+        `(would mis-tag as ${agentForProvider(provider)}); Grok needs --provider xai`
+    );
     return 0;
   }
 
@@ -913,6 +1007,13 @@ async function main() {
       log(`could not build cursor envelope (${trigger}): ${err.message}`);
       return 0; // never block the session
     }
+  } else if (provider === 'xai') {
+    try {
+      envelope = buildGrokEnvelopeFromHook(hook, { trigger, source });
+    } catch (err) {
+      log(`could not build grok envelope (${trigger}): ${err.message}`);
+      return 0; // never block the session
+    }
   } else {
     // On posttooluse, capture the commit SHA from git plumbing BEFORE the skip
     // gate — a `git commit -q` leaves no `[branch sha]` line for
@@ -995,6 +1096,8 @@ module.exports = {
   buildAntigravityEnvelopeFromHook,
   buildCodexEnvelopeFromHook,
   buildCursorEnvelopeFromHook,
+  buildGrokEnvelopeFromHook,
+  looksLikeGrokStdin,
   postEnvelope,
   byteCursorPath,
   posttooluseCanSkip,

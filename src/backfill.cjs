@@ -49,12 +49,13 @@ function redactHome(msg) {
   return home ? String(msg).split(home).join('~') : String(msg);
 }
 
-const AGENT_SLUGS = ['claude_code', 'codex', 'agy', 'cursor'];
+const AGENT_SLUGS = ['claude_code', 'codex', 'agy', 'cursor', 'grok'];
 const AGENT_LABELS = {
   claude_code: 'Claude Code',
   codex: 'Codex',
   agy: 'Antigravity',
   cursor: 'Cursor',
+  grok: 'Grok',
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -127,6 +128,41 @@ function enumerate(agentSlug) {
         } finally {
           if (db && typeof db.close === 'function') db.close();
         }
+      }
+      case 'grok': {
+        const grok = require('./parser/grok.cjs');
+        const fs = require('fs');
+        const path = require('path');
+        const root = grok.sessionsRoot();
+        const out = [];
+        let groups;
+        try {
+          groups = fs.readdirSync(root, { withFileTypes: true });
+        } catch {
+          return out;
+        }
+        for (const g of groups) {
+          if (!g.isDirectory()) continue;
+          const groupDir = path.join(root, g.name);
+          let ids;
+          try {
+            ids = fs.readdirSync(groupDir, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const s of ids) {
+            if (!s.isDirectory()) continue;
+            const sessionDir = path.join(groupDir, s.name);
+            let mtimeMs = 0;
+            try {
+              mtimeMs = fs.statSync(sessionDir).mtimeMs;
+            } catch {
+              continue;
+            }
+            out.push({ sessionDir, sessionId: s.name, mtimeMs, whenMs: mtimeMs });
+          }
+        }
+        return out;
       }
       default:
         return [];
@@ -205,6 +241,8 @@ function builderFor(agentSlug) {
       return collector.buildAntigravityEnvelopeFromHook;
     case 'cursor':
       return collector.buildCursorEnvelopeFromHook;
+    case 'grok':
+      return collector.buildGrokEnvelopeFromHook;
     default:
       throw new Error(`unknown agent: ${agentSlug}`);
   }
@@ -229,6 +267,13 @@ function syntheticHook(agentSlug, d) {
         cursor_version: null,
         reason: 'backfill',
         duration_ms: null,
+      };
+    case 'grok':
+      return {
+        sessionId: d.sessionId || null,
+        sessionDir: d.sessionDir || null,
+        cwd: null,
+        reason: 'backfill',
       };
     default:
       throw new Error(`unknown agent: ${agentSlug}`);

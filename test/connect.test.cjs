@@ -21,6 +21,7 @@ process.env.CLAUDE_SETTINGS_PATH = path.join(TMP, 'claude', 'settings.json');
 process.env.AGY_HOOKS_PATH = path.join(TMP, 'gemini', 'hooks.json');
 process.env.CODEX_CONFIG_PATH = path.join(TMP, 'codex', 'config.toml');
 process.env.CURSOR_HOOKS_PATH = path.join(TMP, 'cursor', 'hooks.json');
+process.env.GROK_HOOKS_PATH = path.join(TMP, 'grok', 'hooks', 'attribut.json');
 process.env.ATTRIBUT_ALLOW_INSECURE = '1'; // permit the localhost http server
 process.env.ATTRIBUT_NO_BROWSER = '1'; // never spawn a browser in tests
 process.env.ATTRIBUT_POLL_INTERVAL_MS = '5'; // fast polling
@@ -221,20 +222,21 @@ test('runConnect --key: non-interactive installs ALL tools + emits, no device fl
 
     // Default (no --agent) wires up EVERY installable tool under the ONE token —
     // proven by codex/cursor/agy getting it without being named. Hooks written.
-    for (const a of ['claude_code', 'agy', 'codex', 'cursor']) {
+    for (const a of ['claude_code', 'agy', 'codex', 'cursor', 'grok']) {
       assert.equal(tokenStore.readToken(a), 'cloud-tok');
     }
     assert.match(fs.readFileSync(process.env.CLAUDE_SETTINGS_PATH, 'utf8'), /collector\.cjs/);
     assert.match(fs.readFileSync(process.env.CODEX_CONFIG_PATH, 'utf8'), /--provider openai/);
+    assert.match(fs.readFileSync(process.env.GROK_HOOKS_PATH, 'utf8'), /--provider xai/);
 
     // One connection event per connected tool, each bearing the shared token.
-    assert.equal(srv.calls.connect.length, 4);
+    assert.equal(srv.calls.connect.length, 5);
     assert.equal(srv.calls.connect[0].headers['authorization'], 'Bearer cloud-tok');
     assert.equal(srv.calls.connect[0].body.agent, 'claude_code');
     assert.equal(srv.calls.connect[0].body.connector_type, 'otel');
     assert.deepEqual(
       srv.calls.connect.map((c) => c.body.agent).sort(),
-      ['agy', 'claude_code', 'codex', 'cursor'],
+      ['agy', 'claude_code', 'codex', 'cursor', 'grok'],
     );
   } finally {
     await srv.close();
