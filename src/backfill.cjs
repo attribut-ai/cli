@@ -134,6 +134,13 @@ function enumerate(agentSlug) {
         const fs = require('fs');
         const path = require('path');
         const root = grok.sessionsRoot();
+        // Grok writes every subagent TWICE: nested under its parent AND as a
+        // complete top-level session dir, structurally indistinguishable from a
+        // real session. Without this set each worker would backfill as an
+        // independent sibling session (inflating session counts and the value
+        // model); it is nested into its parent's grok.subagents[] instead. The
+        // walk is memoized inside the parser, so this is one scan per run.
+        const childIds = grok.subagentChildIds();
         const out = [];
         let groups;
         try {
@@ -152,6 +159,7 @@ function enumerate(agentSlug) {
           }
           for (const s of ids) {
             if (!s.isDirectory()) continue;
+            if (childIds.has(s.name)) continue; // subagent child — nested, not top-level
             const sessionDir = path.join(groupDir, s.name);
             let mtimeMs = 0;
             try {
