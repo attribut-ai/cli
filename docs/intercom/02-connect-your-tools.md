@@ -27,7 +27,7 @@ It asks which tools to capture, prints a URL and a short code, opens your browse
 Skip the picker by naming tools, and control the browser:
 
 ```sh
-attribut connect --agents=claude_code,agy,codex,cursor --no-browser
+attribut connect --agents=claude_code,agy,codex,cursor,grok --no-browser
 ```
 
 ## No display / headless

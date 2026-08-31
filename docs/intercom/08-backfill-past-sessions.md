@@ -26,6 +26,7 @@ Backfill can only send sessions the tool still keeps on disk, and **each tool ma
 | Cursor | `state.vscdb` (local SQLite) | Long — typically many months |
 | OpenAI Codex | `~/.codex/sessions/…/rollout-*.jsonl` | As far back as you've used it |
 | Google Antigravity | `~/.gemini/antigravity-cli/conversations/*.db` | As far back as you've used it |
+| Grok Build | `~/.grok/sessions/…/` | As far back as you've used it |
 
 ## "Why did `--all` only import the last month of Claude Code?"
 
