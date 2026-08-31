@@ -1008,6 +1008,14 @@ async function main() {
       return 0; // never block the session
     }
   } else if (provider === 'xai') {
+    // Grok writes every subagent as a COMPLETE top-level session dir of its own,
+    // so a worker's Stop/SessionEnd (if Grok fires one) would POST as a sibling
+    // session. Suppress it — the worker is nested into its parent's
+    // payload.grok.subagents[] instead. Mirrors the antigravity guard above.
+    if (!dryRun && grokParser.isSubagentSession(grokSessionId(hook))) {
+      log(`suppressing grok subagent child ${grokSessionId(hook)} (nested in its parent)`);
+      return 0;
+    }
     try {
       envelope = buildGrokEnvelopeFromHook(hook, { trigger, source });
     } catch (err) {

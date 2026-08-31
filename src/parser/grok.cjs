@@ -28,8 +28,16 @@
 //   grok.context_*               = signals occupancy, never priced
 //
 // title is the one authorized content-derived field (generated_title, cap 200).
-// Line metrics stay NULL — no classified-diff source. Subagents stay empty —
-// no content-free source is wired.
+// Line metrics stay NULL — no classified-diff source.
+//
+// Subagents: Grok writes each worker to `<session>/subagents/<childId>/` as
+// {meta.json, output.json} AND, separately, as a COMPLETE top-level session dir
+// of its own. Only meta.json is allowlisted, and from it only the numeric /
+// label fields below — `prompt` is CONTENT and is never copied. output.json is
+// CONTENT end-to-end and is NEVER opened.
+//   meta.json  child_session_id, child_cwd, subagent_type, description, status,
+//              started_at, completed_at, duration_ms, tool_calls, turns,
+//              effective_model_id
 
 const fs = require('fs');
 const path = require('path');
@@ -43,6 +51,11 @@ const CAP_REPO = 2000;
 const CAP_LABEL = 128;
 
 const ALLOWED_FILES = new Set(['summary.json', 'signals.json', 'events.jsonl', 'updates.jsonl']);
+
+// The ONLY file the parser may open inside `<session>/subagents/<childId>/`.
+// Its sibling output.json is the worker's verbatim answer — never opened.
+const SUBAGENT_DIR = 'subagents';
+const SUBAGENT_META = 'meta.json';
 
 const USAGE_INT_KEYS = [
   'inputTokens',
@@ -348,6 +361,178 @@ function resolveSessionDir({ sessionId, cwd, sessionDir } = {}) {
   return stated[0].path;
 }
 
+// Copy ONLY the allowlisted meta.json fields. `prompt` (the worker's full task
+// text) and every unknown key are dropped unread — nothing outside this list can
+// reach a payload.
+function pickSubagentMeta(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const str = (v) => (typeof v === 'string' && v ? v : null);
+  return {
+    child_session_id: str(raw.child_session_id),
+    child_cwd: str(raw.child_cwd),
+    subagent_type: str(raw.subagent_type),
+    description: str(raw.description),
+    status: str(raw.status),
+    started_at: raw.started_at,
+    completed_at: raw.completed_at,
+    duration_ms: intOrNull(raw.duration_ms),
+    tool_calls: intOrNull(raw.tool_calls),
+    turns: intOrNull(raw.turns),
+    effective_model_id: str(raw.effective_model_id),
+  };
+}
+
+// Read + allowlist `<parentSessionDir>/subagents/<childId>/meta.json`. Returns
+// [{ dirName, meta }] in directory order; [] when there is no subagents dir.
+// A single unreadable/garbage meta is skipped, never fatal.
+function readSubagentMetas(parentSessionDir) {
+  const subRoot = path.join(parentSessionDir, SUBAGENT_DIR);
+  let entries;
+  try {
+    entries = fs.readdirSync(subRoot, { withFileTypes: true });
+  } catch {
+    return []; // no subagents dir for this session
+  }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(path.join(subRoot, e.name, SUBAGENT_META), 'utf8'));
+    } catch {
+      continue; // missing/garbage meta.json — skip this worker
+    }
+    const meta = pickSubagentMeta(raw);
+    if (meta) out.push({ dirName: e.name, meta });
+  }
+  return out;
+}
+
+// Build the parent's nested subagents[] from the on-disk worker records (the
+// file plane). Grok writes each worker TWICE: as
+// `<parent>/subagents/<childId>/{meta.json,output.json}` AND as a complete
+// top-level session dir at `<sessionsRoot>/<encodeURIComponent(child_cwd)>/<childId>/`
+// (the group dir name is the URL-encoded cwd, same encoding resolveSessionDir uses).
+//
+// meta.json carries the labels + timings; the child's own session dir carries the
+// tokens, so we parse it with the SAME parseGrokSession with subagent discovery
+// DISABLED to bound recursion to exactly one level (mirrors
+// claude_code.buildClaudeSubagents). When that dir is missing or unparseable the
+// worker is still emitted from meta.json alone with null token fields — never
+// dropped. Numbers + content-safe labels only; `prompt` and output.json never
+// touched. Returns [] on any failure; never throws (mirrors both precedents).
+function buildGrokSubagents(parentSessionDir, sessionId) {
+  try {
+    if (!parentSessionDir) return [];
+    const root = sessionsRoot();
+    const out = [];
+    for (const { dirName, meta } of readSubagentMetas(parentSessionDir)) {
+      const childId = meta.child_session_id || dirName;
+      // Guard the degenerate self-reference: a meta pointing back at its own
+      // parent would otherwise re-parse the parent dir as its own worker.
+      if (sessionId && childId === sessionId) continue;
+
+      let child = null;
+      if (meta.child_cwd && childId) {
+        const childDir = path.join(root, encodeURIComponent(meta.child_cwd), childId);
+        try {
+          child = parseGrokSession(childDir, { sessionId: childId, withSubagents: false });
+        } catch {
+          child = null; // child dir missing/unparseable — meta.json alone below
+        }
+      }
+      const cg = (child && child.grok) || {};
+
+      out.push({
+        agent_type: cap(meta.subagent_type, CAP_LABEL),
+        // Owner's decision: the human-readable task label is the worker's role.
+        role: cap(meta.description, CAP_LABEL),
+        // meta.effective_model_id is the parent's record of the model this worker
+        // actually resolved to; the child's own summary is the fallback.
+        model: cap(meta.effective_model_id || (child && child.model), CAP_LABEL),
+        status: cap(meta.status, CAP_LABEL),
+        tool_uses: (child && child.tool_uses) || [],
+        tool_use_count:
+          child && child.num_tool_calls != null ? child.num_tool_calls : meta.tool_calls,
+        // Token fields come ONLY from the child's own session dir. Absent it they
+        // stay null (unknown), never 0 — 0 would read as "ran and spent nothing".
+        input_tokens: child ? child.tokens_in : null,
+        output_tokens: child ? child.tokens_out : null,
+        cache_read_tokens: child ? cg.cache_read_tokens : null,
+        cache_creation_tokens: child ? cg.cache_creation_tokens : null,
+        // Timings are authoritative in meta.json (the parent observed the spawn);
+        // fall back to the child's own window when meta omits them.
+        started_at: toIso(meta.started_at) || (child ? child.started_at : null),
+        ended_at: toIso(meta.completed_at) || (child ? child.ended_at : null),
+        duration_ms: meta.duration_ms != null ? meta.duration_ms : child ? child.duration_ms : null,
+        // Grok has no classified-diff source, so line metrics stay NULL here too.
+        ...NULL_STRUCT,
+        commit_shas: child && Array.isArray(child.commitSHA) ? child.commitSHA : [],
+        branch: child ? child.branch : null,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// subagent suppression set
+// ---------------------------------------------------------------------------
+
+// Every child_session_id under `<sessionsRoot>/*/*/subagents/*/meta.json`.
+// Because Grok writes each worker as a full top-level session dir too, callers
+// that enumerate sessions (backfill) or dispatch a hook (collector) MUST skip
+// these ids or every worker surfaces as an independent sibling session.
+//
+// Cached per resolved sessionsRoot for the life of the process: the walk happens
+// once, and a test that repoints GROK_SESSIONS_DIR gets its own entry rather than
+// a stale one.
+const _childIdCache = new Map(); // sessionsRoot -> Set<childId>
+
+function subagentChildIds() {
+  const root = sessionsRoot();
+  const hit = _childIdCache.get(root);
+  if (hit) return hit;
+  const ids = new Set();
+  try {
+    for (const g of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!g.isDirectory()) continue;
+      const groupDir = path.join(root, g.name);
+      let sessions;
+      try {
+        sessions = fs.readdirSync(groupDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const s of sessions) {
+        if (!s.isDirectory()) continue;
+        for (const { dirName, meta } of readSubagentMetas(path.join(groupDir, s.name))) {
+          ids.add(meta.child_session_id || dirName);
+        }
+      }
+    }
+  } catch {
+    /* no sessions root — empty set, suppress nothing */
+  }
+  _childIdCache.set(root, ids);
+  return ids;
+}
+
+// True when `sessionId` is some other session's subagent child. Cheap after the
+// first call (see the cache above).
+function isSubagentSession(sessionId) {
+  if (!sessionId) return false;
+  return subagentChildIds().has(sessionId);
+}
+
+// Test hook: drop the memoized walk (a suite that mutates a staged sessions root
+// between assertions needs the next call to re-scan).
+function _resetSubagentCache() {
+  _childIdCache.clear();
+}
+
 function parseGrokSession(sessionDir, extra = {}) {
   if (!sessionDir) {
     throw new Error('Grok session dir is required.');
@@ -430,7 +615,9 @@ function parseGrokSession(sessionDir, extra = {}) {
       context_tokens: signals ? signals.contextTokensUsed : null,
       context_token_limit: signals ? signals.contextWindowTokens : null,
       cost_usd_ticks: tokens.cost_usd_ticks,
-      subagents: [],
+      // Discovery is opt-OUT: buildGrokSubagents re-enters this parser for each
+      // child with withSubagents:false, which bounds recursion to one level.
+      subagents: extra.withSubagents === false ? [] : buildGrokSubagents(abs, sessionId),
     },
   };
 }
@@ -441,4 +628,8 @@ module.exports = {
   sessionsRoot,
   disjointTokens,
   expandHome,
+  buildGrokSubagents,
+  subagentChildIds,
+  isSubagentSession,
+  _resetSubagentCache,
 };
