@@ -19,7 +19,7 @@ If you see that, data is being sent.
 ## Common issues
 
 - **Nothing is being sent.** Check stderr. A `[attribut] POST failed: …` line points to a network or endpoint problem. A `no ingest token …` line means no token is stored — re-run `attribut connect` (or `attribut install`) to store one.
-- **Just installed, but no data.** Restart any running sessions so they pick up the hook. For Codex and Cursor you must also accept the one-time trust prompt the first time you run the tool. See "Supported tools & setup notes".
+- **Just installed, but no data.** Restart any running sessions so they pick up the hook. For Codex and Cursor you must also accept the one-time trust prompt the first time you run the tool; Grok Build needs no trust prompt. See "Supported tools & setup notes".
 - **The hook path broke.** The package must stay durably installed — the hook invokes the installed collector by absolute path. Do not run it via ephemeral `npx`. Reinstall globally:
 
 ```sh
@@ -42,6 +42,8 @@ The connector reads these environment variables:
 | `CODEX_CONFIG_PATH` | Override Codex config.toml target | `~/.codex/config.toml` |
 | `CURSOR_HOOKS_PATH` | Override Cursor hooks.json target | `~/.cursor/hooks.json` |
 | `AGY_HOOKS_PATH` | Override Antigravity hooks.json target | `~/.gemini/config/hooks.json` |
+| `GROK_HOOKS_PATH` | Override Grok Build attribut.json target | `~/.grok/hooks/attribut.json` |
+| `GROK_SESSIONS_DIR` | Override where Grok Build sessions are read from | `~/.grok/sessions` |
 | `ATTRIBUT_ALLOW_INSECURE` | `1` permits a non-https endpoint (localhost testing only) | — |
 
 ## Related

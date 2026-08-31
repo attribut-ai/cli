@@ -1,16 +1,19 @@
 # attribut — allowlist telemetry collector
 
 The thin, **dumb** telemetry collector for ATTRIBUT. It runs as a hook for
-**Claude Code**, **Google Antigravity**, **OpenAI Codex**, and **Cursor**,
-extracts **only an allowlist** of safe, signal-bearing fields from the local
-transcript/rollout/state DB, tags the payload with its provider/tool, gzips it,
-and POSTs it to the ingest endpoint. That is all it does.
+**Claude Code**, **Google Antigravity**, **OpenAI Codex**, **Cursor**, and
+**Grok Build**, extracts **only an allowlist** of safe, signal-bearing fields
+from the local transcript/rollout/state DB, tags the payload with its
+provider/tool, gzips it, and POSTs it to the ingest endpoint. That is all it does.
 
 ## What it does (and what it never does)
 
 - Reads **only** each tool's own local session record — Claude Code's
-  transcript `.jsonl`, Codex's rollout `.jsonl`, and Cursor's / Antigravity's
-  local state DB. Nothing is fetched from the network to build a payload.
+  transcript `.jsonl`, Codex's rollout `.jsonl`, Grok's session directory
+  (`summary.json` / `signals.json` / `events.jsonl` / `updates.jsonl` only —
+  never `chat_history.jsonl` or `prompt_context.json`), and Cursor's /
+  Antigravity's local state DB. Nothing is fetched from the network to build a
+  payload.
 - Extracts **only** the fields named in the frozen contract (the vendored
   [`src/contract/envelope.schema.json`](src/contract/envelope.schema.json)):
   session id, **device id**, model, token counts, cache tokens, commit SHAs
@@ -66,7 +69,13 @@ free-form string is length-capped before it is sent.
 The table above lists the Claude Code payload. Other supported tools share the
 same agnostic fields; a few carry a tool-scoped identity value the tool itself
 exposes — notably Cursor's `cursor.user_email` (the signed-in Cursor account
-email). Like everything else it is defined in the [schema](src/contract/envelope.schema.json)
+email). Grok carries its own `grok.*` group instead of `claude_code.*` —
+`cache_read_tokens` / `cache_creation_tokens` / `reasoning_output_tokens` (split
+out from Grok's disjoint token accounting), `effort` (`summary.reasoning_effort`),
+`context_tokens` / `context_token_limit` (occupancy, never priced), and
+`cost_usd_ticks` (passed through, never re-derived client-side); line metrics and
+subagents stay `null`/`[]` — Grok exposes no classified-diff or subagent source.
+Like everything else it is defined in the [schema](src/contract/envelope.schema.json)
 and sent only to your own ingest over TLS. The one model-generated free-text value
 that ever leaves the machine is `title` (a ≤200-char session summary).
 
@@ -114,11 +123,11 @@ test/fixtures/synthetic.jsonl synthetic transcript (no real user data)
 
 ```sh
 # pick the tools to capture, approve in a browser — hooks install themselves
-attribut connect [--agents=claude_code,agy,codex,cursor] [--no-browser]
+attribut connect [--agents=claude_code,agy,codex,cursor,grok] [--no-browser]
 ```
 
 `connect` is the **device flow** (like `gh auth login`): it asks which on-device
-tools to capture (`claude_code`, `agy`, `codex`, `cursor`), starts a request with the app,
+tools to capture (`claude_code`, `agy`, `codex`, `cursor`, `grok`), starts a request with the app,
 prints a short code + URL (and best-effort opens your browser), then polls until
 you approve. On approval the server mints **one ingest token per agent** and the
 CLI installs each agent's capture hook and emits a *connection-established*
@@ -140,6 +149,16 @@ cumulative-input upper bound, session LOC totals, and Cursor's own exact
 local `state.vscdb` (never prompt/response/code/summary text). The server derives
 tokens/value/cost from those; cost is never fabricated client-side. Cursor
 subagents (each its own composer) are nested into their parent session.
+
+**Grok Build** writes hooks to a **dedicated** `~/.grok/hooks/attribut.json`
+rather than merging into Claude's or Cursor's settings file — Grok also scans
+those files, so a merged entry would dual-fire and mis-tag Grok sessions as
+`claude_code`. No trust prompt to accept: the hook file is picked up on the
+next Grok session with no extra step. Grok has its own disjoint token
+accounting (`inputTokens` already includes cached reads, so `tokens_in` is
+`inputTokens − cachedReadTokens`) and no classified-diff or subagent source, so
+line metrics stay `null` and subagents stay `[]` (see `grok.*` under Fields
+sent above).
 
 **Headless / no browser:** pass `--no-browser` (or run where there's no display)
 and the CLI just prints the URL + code — approve it from your phone or laptop.
@@ -183,7 +202,8 @@ and re-sends them through the exact same envelope-build + POST path live capture
 uses — so the payload shape, contract validation, and metadata-only privacy
 guarantee are identical to a live session (it re-reads the same on-disk
 transcripts/DBs the parsers already know: `~/.claude/projects`, `~/.codex/sessions`,
-Antigravity's per-conversation store, Cursor's `state.vscdb`).
+Antigravity's per-conversation store, Cursor's `state.vscdb`, Grok's
+`~/.grok/sessions` directory).
 
 `connect` **runs this automatically** right after it installs hooks (interactive
 terminals only — scripted/non-TTY connects skip it): it imports your **last 90
@@ -200,8 +220,9 @@ can only send what each tool still keeps on disk, and the tools differ:
   (e.g. `"cleanupPeriodDays": 365`) — this only affects sessions going *forward*;
   already-deleted transcripts are gone.
 - **Cursor** keeps a long history in its local `state.vscdb` (often many months).
-- **Codex** and **Antigravity** retain their on-disk session records until you
-  remove them; how far back `--all` reaches tracks how long you've used the tool.
+- **Codex**, **Antigravity**, and **Grok Build** retain their on-disk session
+  records until you remove them; how far back `--all` reaches tracks how long
+  you've used the tool.
 
 Because live capture posts each new session at session-end regardless of these
 policies, backfill only ever matters for the window *before* you connected — and
@@ -366,6 +387,9 @@ tail-read. `SessionEnd` / `Stop` always reconcile the full session.
 | `CODEX_SESSIONS_DIR` | override where Codex rollouts are resolved from | `~/.codex/sessions` |
 | `CURSOR_HOOKS_PATH` | override the Cursor `hooks.json` install target | `~/.cursor/hooks.json` |
 | `CURSOR_STATE_DB` | override the Cursor `state.vscdb` the parser reads (numbers-only) | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
+| `GROK_HOOKS_PATH` | override the Grok Build `attribut.json` install target | `~/.grok/hooks/attribut.json` |
+| `GROK_SESSIONS_DIR` | override where Grok Build sessions are resolved from | `~/.grok/sessions` |
+| `GROK_HOME` | override the Grok Build home dir (`hooks/` and `sessions/` resolve under it) | `~/.grok` |
 | `CLAUDE_CODE_REMOTE_SESSION_ID` | set by Claude Code in cloud VMs; stamps `claude.remoteSessionId` + `_isCloud` | — |
 | `ATTRIBUT_LAUNCHD_DIR` | override the launchd LaunchAgents dir the heartbeat timer installs into (macOS) | `~/Library/LaunchAgents` |
 | `ATTRIBUT_SYSTEMD_USER_DIR` | override the systemd `--user` unit dir the heartbeat timer installs into (Linux) | `~/.config/systemd/user` |
@@ -477,7 +501,7 @@ The collector logs every action to **stderr** prefixed with `[attribut]`, and
   installs durably (under `~/.attribut/npm` if the system prefix is root-owned)
   and re-bakes every hook and the heartbeat timer onto that path.
 - After installing, **restart any running sessions** (Claude Code, Codex,
-  Cursor, Antigravity) to pick up the hook.
+  Cursor, Antigravity, Grok Build) to pick up the hook.
 
 ## License
 
