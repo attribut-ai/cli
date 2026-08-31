@@ -1,6 +1,6 @@
 {
   "name": "attribut",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "ATTRIBUT thin allowlist telemetry collector for AI coding agents (Claude Code, OpenAI Codex, Cursor, Google Antigravity, Grok Build) — extracts only safe, signal-bearing fields (never prompt/response/code/diff text) and POSTs them to ingest.",
   "keywords": [
     "telemetry",

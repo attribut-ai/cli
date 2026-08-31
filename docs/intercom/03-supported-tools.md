@@ -1,6 +1,6 @@
 # Supported tools & setup notes
 
-ATTRIBUT captures four AI coding tools by installing a small capture hook in each tool's config file, and each tool has one quick step to switch the hook on.
+ATTRIBUT captures five AI coding tools by installing a small capture hook in each tool's config file, and each tool has one quick step to switch the hook on.
 
 ## Supported tools
 
@@ -10,6 +10,7 @@ ATTRIBUT captures four AI coding tools by installing a small capture hook in eac
 | OpenAI Codex | `~/.codex/config.toml` | Run `codex` once, accept the `/hooks` trust prompt |
 | Cursor | `~/.cursor/hooks.json` | Restart Cursor, accept the one-time hooks trust prompt |
 | Google Antigravity (Gemini) | `~/.gemini/config/hooks.json` | Restart agy sessions / the Antigravity IDE |
+| Grok Build | `~/.grok/hooks/attribut.json` (dedicated file) | Restart running Grok sessions |
 
 ## Claude Code
 
@@ -26,6 +27,10 @@ Restart Cursor and accept the one-time hooks trust prompt. Cursor exposes no bil
 ## Google Antigravity (Gemini)
 
 Restart your agy sessions or the Antigravity IDE to activate the hook.
+
+## Grok Build
+
+The hook is registered as soon as you connect — no trust prompt to accept. It writes to its own dedicated `~/.grok/hooks/attribut.json` rather than merging into Claude's or Cursor's settings, since Grok also scans those files and a merged entry would dual-fire and mis-tag Grok sessions as another tool. Restart any running Grok sessions to pick it up.
 
 ## Existing hooks are preserved
 

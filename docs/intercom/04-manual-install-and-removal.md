@@ -22,6 +22,7 @@ By default this registers the capture hook for Claude Code. To target a differen
 | `antigravity` | Google Antigravity (Gemini) |
 | `openai` | OpenAI Codex |
 | `cursor` | Cursor |
+| `xai` | Grok Build |
 
 Your token is written to an owner-only (`0600`) file — never into a settings file, and never left on the command line.
 
