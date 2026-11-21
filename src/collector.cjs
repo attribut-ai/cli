@@ -1102,15 +1102,46 @@ const MANAGEMENT_COMMANDS = new Set([
   'update',
 ]);
 
+// Resolve once everything already written to `stream` has been handed to the OS.
+// Pipe writes are asynchronous on POSIX, so a process.exit() straight after a
+// large write() truncated a piped stdout at the pipe buffer (64 KB on macOS) —
+// `--dry-run`, `--parse` and `backfill --dry-run` printed invalid JSON. An empty
+// write queues behind the pending data and its callback fires once that data is
+// flushed. Nothing pending (the hook hot path writes nothing to stdout) → resolves
+// at once, writing nothing. The bound is only a safety net against a reader that
+// never drains; a normal reader takes milliseconds.
+const DRAIN_TIMEOUT_MS = 10000;
+function drain(stream) {
+  return new Promise((resolve) => {
+    if (!stream || stream.destroyed || !stream.writable || !stream.writableLength) return resolve();
+    const timer = setTimeout(resolve, DRAIN_TIMEOUT_MS);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    try {
+      stream.write('', done);
+    } catch {
+      done();
+    }
+  });
+}
+
+async function exitAfterFlush(code) {
+  await Promise.all([drain(process.stdout), drain(process.stderr)]);
+  process.exit(code);
+}
+
 // Top-level: a normally-returned code is honored. An UNCAUGHT error is logged;
 // then we exit non-zero for the fail-loud management subcommands and exit 0 for
-// the hook hot path (telemetry must never break the user's session).
+// the hook hot path (telemetry must never break the user's session). Every exit
+// first flushes stdout/stderr, so printed payloads of any size arrive whole.
 if (require.main === module) {
   main()
-    .then((code) => process.exit(typeof code === 'number' ? code : 0))
+    .then((code) => exitAfterFlush(typeof code === 'number' ? code : 0))
     .catch((err) => {
       log(`unexpected error: ${err && err.message ? err.message : err}`);
-      process.exit(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
+      return exitAfterFlush(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
     });
 }
 
