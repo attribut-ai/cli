@@ -15,9 +15,6 @@ const assert = require('node:assert');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const http = require('node:http');
-const zlib = require('node:zlib');
-const { spawn } = require('node:child_process');
 
 // Isolate config side effects (device_uuid, hook state) before requiring the collector.
 process.env.ATTRIBUT_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-stores-cfg-'));
@@ -28,8 +25,8 @@ const collector = require('../src/collector.cjs');
 const backfill = require('../src/backfill.cjs');
 const { validateEnvelope } = require('../src/envelope.cjs');
 const { buildSyntheticDb, buildSummariesDb, writeBrainTranscript } = require('./fixtures/agy/build_db.cjs');
+const { startIngest, listen, close, runAgyCollector } = require('./fixtures/agy/harness.cjs');
 
-const COLLECTOR = path.join(__dirname, '..', 'src', 'collector.cjs');
 const FIXTURE = path.join(__dirname, 'fixtures', 'agy', 'transcript_full.jsonl');
 const FIXTURE_TEXT = fs.readFileSync(FIXTURE, 'utf8'); // has a run_command Cwd of /tmp/agy_fix
 
@@ -84,54 +81,6 @@ function hookFor(root, id, transcriptText = FIXTURE_TEXT) {
 
 function build(hook) {
   return collector.buildAntigravityEnvelopeFromHook(hook, { trigger: 'posttooluse', source: 'cli' });
-}
-
-// --- local ingest + collector process harness --------------------------------
-
-function startIngest() {
-  const captured = [];
-  const srv = http.createServer((req, res) => {
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      let body = Buffer.concat(chunks);
-      if (req.headers['content-encoding'] === 'gzip') body = zlib.gunzipSync(body);
-      captured.push({ url: req.url, json: JSON.parse(body.toString('utf8')) });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('{"ok":true}');
-    });
-  });
-  return { srv, captured };
-}
-
-function listen(srv) {
-  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)));
-}
-
-function close(srv) {
-  return new Promise((resolve) => srv.close(resolve));
-}
-
-// Run the real hook entrypoint (NOT --dry-run) asynchronously, so the in-process
-// ingest server can observe any POST it makes.
-function runCollector(hook, port) {
-  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-stores-run-'));
-  fs.writeFileSync(path.join(cfg, 'token'), 'tok-agy-test\n', { mode: 0o600 });
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [COLLECTOR, '--provider', 'antigravity', 'posttooluse'], {
-      env: {
-        ...process.env,
-        ATTRIBUT_CONFIG_DIR: cfg,
-        ATTRIBUT_ALLOW_INSECURE: '1',
-        INGEST_BASE: `http://127.0.0.1:${port}`,
-      },
-    });
-    let stderr = '';
-    child.stderr.on('data', (d) => (stderr += d));
-    child.stdout.resume();
-    child.on('close', (code) => resolve({ code, stderr }));
-    child.stdin.end(JSON.stringify(hook));
-  });
 }
 
 // --- store resolution --------------------------------------------------------
@@ -351,12 +300,12 @@ test('a child hook in a non-default store is suppressed (never posts); its paren
     const { srv, captured } = startIngest();
     const port = await listen(srv);
     try {
-      const child = await runCollector(childHook, port);
+      const child = await runAgyCollector(childHook, port);
       assert.strictEqual(child.code, 0);
       assert.match(child.stderr, /suppressing subagent child/);
       assert.strictEqual(captured.length, 0, 'a subagent child must not post');
 
-      const parent = await runCollector(parentHook, port);
+      const parent = await runAgyCollector(parentHook, port);
       assert.strictEqual(parent.code, 0, parent.stderr);
       assert.strictEqual(captured.length, 1, 'positive control: the parent posts');
       const subs = captured[0].json.payload.antigravity.subagents;

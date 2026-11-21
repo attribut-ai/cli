@@ -539,10 +539,13 @@ function buildEnvelopeFromHook(hook, { trigger, source }) {
   });
 }
 
-// Build the envelope from a Google Antigravity hook object. agy's hook stdin is
-// shaped differently from Claude's: { conversationId, transcriptPath, toolCall,
-// workspacePaths, artifactDirectoryPath, stepIdx, error }. Token usage is NOT in
-// the hook or the transcript — we read it (fail-safe, numbers-only) from the
+// Build the envelope from a Google Antigravity hook object (PostToolUse or Stop).
+// agy's hook stdin is camelCase and shaped differently from Claude's: common
+// fields { conversationId, transcriptPath, workspacePaths, artifactDirectoryPath,
+// modelName, hookEventName, cwd, lastUserInput } plus per-event extras. We read
+// ONLY conversationId, transcriptPath and workspacePaths here — never
+// `lastUserInput` (prompt text) or any other free-text field. Token usage is NOT
+// in the hook or the transcript — we read it (fail-safe, numbers-only) from the
 // per-conversation SQLite store and inject usage_raw. THROWS on parse/validation
 // failure (the caller swallows on the hot path).
 function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
@@ -894,7 +897,9 @@ async function main() {
   try {
     hook = JSON.parse(stdinRaw);
   } catch (err) {
-    log(`could not parse hook JSON from stdin: ${err.message}`);
+    // Never echo err.message: V8's JSON.parse errors quote a fragment of the raw
+    // input, and hook stdin can carry prompt text (e.g. agy's lastUserInput).
+    log(`could not parse hook JSON from stdin (${err.name}, ${stdinRaw.length} bytes)`);
     return 0;
   }
 
@@ -936,9 +941,11 @@ async function main() {
         return 0;
       }
     }
-    // agy posts a cumulative snapshot on each PostToolUse (no payload-bearing
-    // session-end event exists); the server reconciles by sessionId. No Claude
-    // cursor gate — the transcript + token DB are small.
+    // agy posts a cumulative snapshot on each PostToolUse and on Stop (the
+    // execution loop ending — agy has no SessionEnd); the server reconciles by
+    // sessionId. No Claude cursor gate — the transcript + token DB are small.
+    // Nothing is written to stdout here: on Stop, a stdout
+    // {"decision":"continue"} would block the agent from stopping.
     try {
       envelope = buildAntigravityEnvelopeFromHook(hook, { trigger, source });
     } catch (err) {
