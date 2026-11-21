@@ -368,3 +368,41 @@ test('backfill: transcripts resolve per store; repo from the index workspace_uri
     assert.ok(byId[SOLO].num_tool_calls > 0 && byId[DUP].num_tool_calls > 0, 'transcripts read from each store');
   });
 });
+
+test('enumeration counts the WAL: window + de-dup use the newer of .db and .db-wal mtimes', { skip: !nodeSqlite }, async () => {
+  await withStores(2, (roots) => {
+    const at = (iso) => new Date(iso);
+    const touch = (p, iso) => fs.utimesSync(p, at(iso), at(iso));
+    const db = (root, id) => path.join(conv(root), `${id}.db`);
+    buildSyntheticDb(conv(roots[0]), DUP, { input: 1, output: 1 });
+    buildSyntheticDb(conv(roots[1]), DUP, { input: 2, output: 2 });
+    buildSyntheticDb(conv(roots[0]), SOLO, { input: 1, output: 1 });
+    // roots[0] copy of DUP: newer main file, no WAL.
+    touch(db(roots[0], DUP), '2026-03-01T00:00:00Z');
+    // roots[1] copy of DUP: older main file, but its WAL holds the newest write.
+    touch(db(roots[1], DUP), '2026-01-01T00:00:00Z');
+    fs.writeFileSync(`${db(roots[1], DUP)}-wal`, '');
+    touch(`${db(roots[1], DUP)}-wal`, '2026-04-01T00:00:00Z');
+    // SOLO: stale main file, recent WAL.
+    touch(db(roots[0], SOLO), '2026-01-01T00:00:00Z');
+    fs.writeFileSync(`${db(roots[0], SOLO)}-wal`, '');
+    touch(`${db(roots[0], SOLO)}-wal`, '2026-04-01T00:00:00Z');
+
+    const list = tokens.listConversationIds();
+    const dup = list.find((d) => d.id === DUP);
+    assert.strictEqual(dup.store.root, roots[1], 'de-dup keeps the copy with the newest write (WAL)');
+    assert.strictEqual(dup.mtimeMs, Date.parse('2026-04-01T00:00:00Z'));
+    assert.strictEqual(list.find((d) => d.id === SOLO).mtimeMs, Date.parse('2026-04-01T00:00:00Z'));
+
+    // The backfill window sees the WAL write.
+    const cut = Date.parse('2026-02-01T00:00:00Z');
+    let kept = backfill.scan(['agy'], { sinceMs: cut }).perAgent[0].descriptors.map((d) => d.id);
+    assert.deepStrictEqual(kept.sort(), [DUP, SOLO].sort());
+
+    // WAL absent → the main file's mtime (fail-safe): SOLO falls out of the window.
+    fs.unlinkSync(`${db(roots[0], SOLO)}-wal`);
+    assert.strictEqual(tokens.dbMtimeMs(db(roots[0], SOLO)), Date.parse('2026-01-01T00:00:00Z'));
+    kept = backfill.scan(['agy'], { sinceMs: cut }).perAgent[0].descriptors.map((d) => d.id);
+    assert.deepStrictEqual(kept, [DUP]);
+  });
+});

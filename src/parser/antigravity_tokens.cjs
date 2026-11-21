@@ -760,12 +760,27 @@ function readAgentType(conversationId, candidateNames, store) {
   }
 }
 
+// Last-modified time of a conversation DB, counting its write-ahead log: agy
+// keeps the DB in WAL mode, so recent writes land in <db>-wal and the main file's
+// mtime only moves on a checkpoint (often days later). Returns the newer of the
+// two; a missing WAL just means the main file's mtime. THROWS if the DB itself
+// can't be stat'd (the caller skips that copy).
+function dbMtimeMs(dbPath) {
+  const main = fs.statSync(dbPath).mtimeMs;
+  try {
+    return Math.max(main, fs.statSync(`${dbPath}-wal`).mtimeMs);
+  } catch {
+    return main; // no WAL (checkpointed / closed cleanly)
+  }
+}
+
 // List EVERY top-level agy conversation across ALL known stores (subagent
 // children excluded — they fold into their parent). An id present in more than
-// one store is listed once, from the store whose DB has the newest mtime; an id
-// that is a child in any store is excluded. Returns [{ id, mtimeMs, store }]
-// newest-first by mtime — `store` lets the caller build the transcript path in the
-// matching store. READ-ONLY, fail-safe → [] on any error. Never throws.
+// one store is listed once, from the store whose DB was written most recently
+// (dbMtimeMs, WAL included); an id that is a child in any store is excluded.
+// Returns [{ id, mtimeMs, store }] newest-first by mtimeMs — `store` lets the
+// caller build the transcript path in the matching store. READ-ONLY, fail-safe →
+// [] on any error. Never throws.
 function listConversationIds() {
   const byId = new Map();
   const childIds = new Set();
@@ -791,7 +806,7 @@ function listConversationIds() {
       }
       let mtimeMs;
       try {
-        mtimeMs = fs.statSync(path.join(store.conversationsDir, name)).mtimeMs;
+        mtimeMs = dbMtimeMs(path.join(store.conversationsDir, name));
       } catch {
         continue; // stat failed → skip this copy
       }
@@ -832,6 +847,7 @@ module.exports = {
   readAgentType,
   getDatabaseClass,
   listConversationIds,
+  dbMtimeMs,
   SUMMARY_SAFE_COLUMNS,
   MAX_CHILDREN,
   TITLE_PATH,
