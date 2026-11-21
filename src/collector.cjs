@@ -589,6 +589,9 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     // their standalone posts are suppressed in main()). Folds in their tokens
     // server-side. tp is the parent transcript; children live in its store.
     payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId, store);
+    // Subagents do much of the committing; their SHAs never reach the parent
+    // transcript. Fold them into the session's commitSHA (ahead of the parent's).
+    payload.commitSHA = agyParser.foldSubagentShas(payload.commitSHA, payload.antigravity.subagents);
   } else {
     payload.antigravity.usage_raw = null;
   }
