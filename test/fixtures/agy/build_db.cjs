@@ -76,6 +76,7 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
       /* absent */
     }
   }
+  // opts.rows: [] (empty) builds a DB whose only generation is opts.bigUsageRow.
   const rows =
     opts.rows ||
     [{ input: opts.input != null ? opts.input : 1234, output: opts.output != null ? opts.output : 567, cacheRead: opts.cacheRead, contentSentinel: opts.contentSentinel || 'DB_CONTENT_SECRET' }];
@@ -94,6 +95,28 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
       agentType: r.agentType || opts.agentType,
     });
     stmt.run(idx++, blob, blob.length);
+  }
+  if (opts.bigUsageRow) {
+    // The LATEST generation's row as the real store writes it: past MAX_ROW_BYTES
+    // because it also carries the model-context dump. Layout:
+    //   1 { 4 { 2=input, 3=output, 5=cacheRead }   ← usage (must be counted)
+    //       19 = "<model id>"                       ← fixed model-id path
+    //       7 { 1=<dumpVarint>, 2="<dump text>" } } ← context dump (never read)
+    // The dump repeats a model-id-shaped decoy and a content sentinel, and holds a
+    // varint, so a whole-row walk or text scan would visibly misbehave.
+    const u = opts.bigUsageRow;
+    const usage = Buffer.concat([
+      varintField(2, u.input),
+      varintField(3, u.output),
+      u.cacheRead ? varintField(5, u.cacheRead) : Buffer.alloc(0),
+    ]);
+    const dumpText = `${u.dumpText || 'BIG_ROW_DUMP_SECRET'} claude-dump-decoy-model `.repeat(400);
+    const dump = Buffer.concat([varintField(1, u.dumpVarint || 8888888), lenField(2, dumpText)]);
+    const big = lenField(
+      1,
+      Buffer.concat([lenField(4, usage), lenField(19, u.model || 'gemini-3-flash-a'), lenField(7, dump)])
+    );
+    stmt.run(idx++, big, big.length);
   }
   if (opts.bigRow) {
     // An oversized "embedding" row carrying a sentinel + huge varints; the reader

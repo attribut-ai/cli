@@ -41,9 +41,27 @@ const { fileURLToPath } = require('url');
 // from blowing up memory/output and keep usage_raw within the schema's limits.
 const MAX_DEPTH = 7;
 const MAX_ENTRIES = 128; // matches the schema's maxProperties on usage_raw
-// Per-generation usage rows are ~1-2 KB; the embedding/context dumps are 100 KB+.
-// Only walk rows at or below this size — the big rows are model context, not usage.
+// Per-generation usage rows are ~1-2 KB. The LATEST generation's row also carries
+// the model-context dump (100 KB to several MB) beside its usage. Rows at or below
+// this size are walked whole; a larger row contributes ONLY its usage sub-message
+// (USAGE_MESSAGE_PATH) — walking the dump would add thousands of spurious varint
+// paths — and its model id is read only from the fixed MODEL_ID_PATH (the dump is
+// free text and is never regex-scanned).
 const MAX_ROW_BYTES = 8192;
+// The reverse-engineered usage layout inside a gen_metadata row. THE one place
+// this knowledge lives on the client: the session's own usage_raw ships raw
+// (server-mapped); these label nested subagents' tokens and scope big rows.
+//   1.4      the per-generation usage message
+//   input     1.4.2  uncached new input tokens
+//   output    1.4.3  output tokens
+//   cacheRead 1.4.5  cached-prefix (cache-read) input tokens
+// proto3 omits zero-valued varints, so an absent path means 0 for that turn.
+const USAGE_MESSAGE_PATH = '1.4';
+const USAGE_PATHS = Object.freeze({
+  input: `${USAGE_MESSAGE_PATH}.2`,
+  output: `${USAGE_MESSAGE_PATH}.3`,
+  cacheRead: `${USAGE_MESSAGE_PATH}.5`,
+});
 // Sanity cap on subagent children nested under one parent (observed max is in
 // the tens). The contract's subagents array has no lower maxItems.
 const MAX_CHILDREN = 256;
@@ -220,10 +238,17 @@ function looksLikeMessage(chunk) {
   return i === chunk.length && fields > 0;
 }
 
+// Is `key` inside the dotted-path `scope` subtree, or an ancestor on the way to it?
+function onScopePath(key, scope) {
+  return key === scope || key.startsWith(`${scope}.`) || scope.startsWith(`${key}.`);
+}
+
 // Walk a protobuf message, collecting ONLY varint values into `out` keyed by
 // dotted field path (e.g. "10.1.1"). Descends into length-delimited fields that
 // parse as sub-messages; NEVER emits their bytes. Bounded by depth + entry count.
-function collectVarints(buf, prefix, out, depth) {
+// With `scope` (a dotted path), only that subtree is walked and recorded — every
+// other field is skipped by length without being parsed.
+function collectVarints(buf, prefix, out, depth, scope) {
   if (depth > MAX_DEPTH) return;
   let i = 0;
   while (i < buf.length) {
@@ -246,6 +271,7 @@ function collectVarints(buf, prefix, out, depth) {
       } catch {
         return;
       }
+      if (scope && !key.startsWith(`${scope}.`)) continue; // outside the scoped subtree
       // Emit as a JS number. Token counts are small; clamp absurd values out.
       if (v >= 0n && v <= BigInt(Number.MAX_SAFE_INTEGER)) {
         const n = Number(v);
@@ -263,9 +289,10 @@ function collectVarints(buf, prefix, out, depth) {
       if (n < 0 || i + n > buf.length) return;
       const chunk = buf.subarray(i, i + n);
       i += n;
+      if (scope && !onScopePath(key, scope)) continue; // off the scoped path — skip unparsed
       // Descend ONLY if it parses as a message. Never emit the bytes.
       if (n > 0 && looksLikeMessage(chunk)) {
-        collectVarints(chunk, key, out, depth + 1);
+        collectVarints(chunk, key, out, depth + 1, scope);
       }
     } else if (wire === 5) {
       i += 4; // fixed32 — skip (not a token count; could be float/content)
@@ -332,27 +359,39 @@ function readGenMetadata(conversationId, store) {
   let db = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    // One row per generation; SUM each varint path across the small usage rows to
-    // get session totals (per-turn usage, like the Claude collector), and tally the
-    // model-id-shaped tokens in the same pass. The big context/embedding rows are
-    // skipped by size (they are model context, not usage/model labels).
+    // One row per generation; SUM each varint path across the rows to get session
+    // totals (per-turn usage, like the Claude collector), and tally the
+    // model-id-shaped tokens in the same pass. A big row (the latest generation,
+    // which also holds the model-context dump) contributes only its usage
+    // sub-message and the model id at its fixed path.
     const rows = db.prepare('SELECT data FROM gen_metadata ORDER BY idx').all();
     const total = {};
     const modelCounts = new Map();
     for (const row of rows) {
       const blob = row && row.data;
       if (!blob || !(blob instanceof Uint8Array)) continue;
-      if (blob.length > MAX_ROW_BYTES) continue; // embedding dump — not usage/model
-      const b = Buffer.from(blob);
-      // usage: sum each varint path across the small usage rows.
+      const big = blob.length > MAX_ROW_BYTES;
+      const b = Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength);
+      // usage: sum each varint path across rows (a big row: usage subtree only).
       const perRow = {};
-      collectVarints(b, '', perRow, 0);
+      collectVarints(b, '', perRow, 0, big ? USAGE_MESSAGE_PATH : undefined);
       for (const [k, v] of Object.entries(perRow)) {
         if (k in total) {
           if (total[k] + v <= Number.MAX_SAFE_INTEGER) total[k] += v;
         } else if (Object.keys(total).length < MAX_ENTRIES) {
           total[k] = v;
         }
+      }
+      if (big) {
+        // Never scan the context dump's text: take only the string at the row's
+        // fixed model-id path, and only if it is EXACTLY a model id.
+        for (const s of stringsOnPath(b, MODEL_ID_PATH)) {
+          if (MODEL_ID_EXACT_RE.test(s)) {
+            const id = s.toLowerCase();
+            modelCounts.set(id, (modelCounts.get(id) || 0) + 1);
+          }
+        }
+        continue;
       }
       // model: count each model-id-shaped token; most-frequent wins below.
       const text = b.toString('latin1');
@@ -400,6 +439,56 @@ function readUsageRaw(conversationId, store) {
 // the internal one Antigravity stamps per generation (e.g. `gemini-3-flash-a`),
 // which is exactly the key the server's pricing table uses.
 const MODEL_ID_SCAN_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
+// Each gen_metadata row stamps its model id as a string at this fixed path
+// (verified on every small row). Used for the big rows, whose free-text context
+// dump must not be regex-scanned.
+const MODEL_ID_PATH = '1.19';
+const MODEL_ID_EXACT_RE = /^(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}$/i;
+
+// Strings at EXACTLY the dotted path `target`, following only that path: fields
+// off it are skipped by length without being parsed. Nothing else is returned.
+function stringsOnPath(buf, target, prefix = '', out = []) {
+  let i = 0;
+  while (i < buf.length) {
+    let tag;
+    try {
+      [tag, i] = readVarint(buf, i);
+    } catch {
+      return out;
+    }
+    const w = Number(tag & 7n);
+    const f = Number(tag >> 3n);
+    if (f === 0) return out;
+    const key = prefix ? `${prefix}.${f}` : `${f}`;
+    if (w === 0) {
+      try {
+        [, i] = readVarint(buf, i);
+      } catch {
+        return out;
+      }
+    } else if (w === 2) {
+      let len;
+      try {
+        [len, i] = readVarint(buf, i);
+      } catch {
+        return out;
+      }
+      const n = Number(len);
+      if (n < 0 || i + n > buf.length) return out;
+      const chunk = buf.subarray(i, i + n);
+      i += n;
+      if (key === target) out.push(chunk.toString('utf8'));
+      else if (target.startsWith(`${key}.`)) stringsOnPath(chunk, target, key, out);
+    } else if (w === 5) {
+      i += 4;
+    } else if (w === 1) {
+      i += 8;
+    } else {
+      return out;
+    }
+  }
+  return out;
+}
 
 // Read the resolved model id for a conversation, or null. Delegates to the
 // combined single pass, which tallies model-id-shaped tokens across the small
@@ -665,15 +754,6 @@ function readParentId(conversationId, store) {
     }
   }
 }
-
-// The reverse-engineered semantic paths inside a usage_raw map (per-generation
-// sums). THE one place this knowledge lives on the client — used only to label
-// nested subagents' tokens (the session's own usage_raw stays raw → server-mapped).
-//   input     1.4.2  uncached new input tokens
-//   output    1.4.3  output tokens
-//   cacheRead 1.4.5  cached-prefix (cache-read) input tokens
-// proto3 omits zero-valued varints, so an absent path means 0 for that turn.
-const USAGE_PATHS = Object.freeze({ input: '1.4.2', output: '1.4.3', cacheRead: '1.4.5' });
 
 // Project a usage_raw object to { input, output, cacheRead }, or null. Pure, so
 // callers that already hold usage_raw (from a combined readGenMetadata) don't
