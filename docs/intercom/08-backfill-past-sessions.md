@@ -25,7 +25,7 @@ Backfill can only send sessions the tool still keeps on disk, and **each tool ma
 | Claude Code | `~/.claude/projects/…/*.jsonl` | ~30 days by default — Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) |
 | Cursor | `state.vscdb` (local SQLite) | Long — typically many months |
 | OpenAI Codex | `~/.codex/sessions/…/rollout-*.jsonl` | As far back as you've used it |
-| Google Antigravity | `~/.gemini/antigravity-cli/conversations/*.db` | As far back as you've used it |
+| Google Antigravity | `conversations/*.db` under `~/.gemini/antigravity/` (desktop app), `~/.gemini/antigravity-cli/` (`agy` terminal CLI) and `~/.gemini/antigravity-ide/` (legacy IDE) | As far back as you've used it |
 | Grok Build | `~/.grok/sessions/…/` | As far back as you've used it |
 
 ## "Why did `--all` only import the last month of Claude Code?"

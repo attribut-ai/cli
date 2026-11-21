@@ -176,7 +176,16 @@ test('findChildren reverse-scans the conversations dir', { skip: !nodeSqlite }, 
 test('readUsageInputOutput maps the semantic token paths', { skip: !nodeSqlite }, () => {
   withDir((dir) => {
     buildSyntheticDb(dir, 'u', { input: 1234, output: 567 });
-    assert.deepStrictEqual(tokens.readUsageInputOutput('u'), { input: 1234, output: 567 });
+    // no 1.4.5 in any row → cacheRead 0 (proto3 omits zero-valued varints)
+    assert.deepStrictEqual(tokens.readUsageInputOutput('u'), { input: 1234, output: 567, cacheRead: 0 });
+    buildSyntheticDb(dir, 'uc', {
+      rows: [
+        { input: 100, output: 10, cacheRead: 9000 },
+        { input: 50, output: 5, cacheRead: 9100 },
+      ],
+    });
+    assert.deepStrictEqual(tokens.readUsageInputOutput('uc'), { input: 150, output: 15, cacheRead: 18100 });
+    assert.strictEqual(tokens.readUsageRaw('uc')[tokens.USAGE_PATHS.cacheRead], 18100);
   });
 });
 

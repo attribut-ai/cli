@@ -551,10 +551,17 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     throw new Error('antigravity hook has no transcriptPath.');
   }
   const conversationId = hook.conversationId || null;
-  const repo =
+  // The on-disk store this conversation lives in (desktop app / terminal CLI /
+  // legacy IDE): the transcriptPath's own store when it has the canonical brain
+  // shape, else the first known store holding its DB. null → readers search.
+  const store = conversationId ? agyTokens.resolveStore(conversationId, tp) : null;
+  let repo =
     Array.isArray(hook.workspacePaths) && hook.workspacePaths.length
       ? hook.workspacePaths[0]
       : null;
+  // No hook workspace (e.g. backfill's synthetic hook) → the workspace folder the
+  // store index recorded, ahead of the parser's transcript run_command Cwd fallback.
+  if (!repo && conversationId) repo = agyTokens.readSummaryWorkspacePath(conversationId, store);
 
   const payload = agyParser.parseAntigravityTranscript(tp, {
     sessionId: conversationId,
@@ -569,16 +576,16 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     // One combined read of gen_metadata (usage_raw + model in a single DB
     // open/parse) instead of readUsageRaw()+readModel(), which each re-opened and
     // re-scanned the same rows. Runs on every PostToolUse fire, so it matters.
-    const gen = agyTokens.readGenMetadata(conversationId);
+    const gen = agyTokens.readGenMetadata(conversationId, store);
     payload.antigravity.usage_raw = gen.usageRaw;
     if (!payload.model) payload.model = gen.model;
     // The generated session title (agy's content-derived summary; readTitle caps
     // to the schema's 200) — same allowlisted exception as Claude's ai-title.
-    if (!payload.title) payload.title = agyTokens.readTitle(conversationId);
+    if (!payload.title) payload.title = agyTokens.readTitle(conversationId, store);
     // Nest this session's subagents (agy runs each as a separate conversation;
     // their standalone posts are suppressed in main()). Folds in their tokens
-    // server-side. tp is the parent transcript.
-    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId);
+    // server-side. tp is the parent transcript; children live in its store.
+    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId, store);
   } else {
     payload.antigravity.usage_raw = null;
   }
@@ -919,9 +926,11 @@ async function main() {
     // Subagents run as their OWN conversations and fire their own hooks. Suppress
     // a subagent child's standalone post — it is nested into its parent's session
     // (payload.antigravity.subagents[]) instead, so it doesn't surface as a
-    // separate session. Detection: the child stores its parent id in the DB.
+    // separate session. Detection: the child stores its parent id in the DB,
+    // read from the child's own store (resolved from its transcriptPath).
     if (!dryRun) {
-      const parentId = agyTokens.readParentId(hook.conversationId);
+      const childStore = agyTokens.resolveStore(hook.conversationId, hook.transcriptPath);
+      const parentId = agyTokens.readParentId(hook.conversationId, childStore);
       if (parentId) {
         log(`suppressing subagent child ${hook.conversationId} (parent ${parentId})`);
         return 0;

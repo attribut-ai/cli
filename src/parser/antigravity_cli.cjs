@@ -12,8 +12,10 @@
 // and the line LENGTH leave, as integers.
 //
 // Token usage is NOT in the transcript (it lives only in the per-conversation
-// SQLite store). The collector fills payload.antigravity.usage_raw separately
-// via the fail-safe token module; this parser sets it null.
+// SQLite DB of the conversation's store — desktop app, terminal CLI or legacy
+// IDE; see antigravity_tokens.cjs). The collector fills
+// payload.antigravity.usage_raw separately via the fail-safe token module; this
+// parser sets it null.
 //
 // Transcript shape (one JSON object per line, verified against agy 1.0.8):
 //   { type, source, status, step_index, created_at, content?, tool_calls?,
@@ -287,14 +289,13 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
   return payload;
 }
 
-// Brain transcript path for a conversation id (sibling of the conversations dir).
-// AGY_BRAIN_DIR overrides for tests.
-function brainTranscriptPath(conversationId) {
-  const base =
-    process.env.AGY_BRAIN_DIR ||
-    path.join(path.dirname(agyTokens.conversationsDir()), 'brain');
+// Brain transcript path for a conversation id, inside the conversation's store
+// (`store` when given, else the first known store holding its DB, else the
+// highest-priority store). AGY_BRAIN_DIR overrides the brain dir for tests.
+function brainTranscriptPath(conversationId, store) {
+  const s = store || agyTokens.findStore(conversationId) || agyTokens.knownStores()[0];
   return path.join(
-    base,
+    s.brainDir,
     path.basename(String(conversationId || '')),
     '.system_generated',
     'logs',
@@ -413,23 +414,27 @@ function childStats(childTranscriptPath) {
 }
 
 // Build the parent's nested subagents[] (Claude-style). For each child of
-// `parentConversationId` (found by reverse parent-link): its agent_type (matched
-// from the parent's declared names), role, model, per-tool tool_uses breakdown +
-// total tool_use_count, semantic input/output tokens, and the child's session
-// window (started_at/ended_at/duration_ms from its own transcript). Numbers +
+// `parentConversationId` (found by reverse parent-link in the parent's own
+// store): its agent_type (matched from the parent's declared names, else the
+// store index's short agent_name label), role, model, per-tool tool_uses
+// breakdown + total tool_use_count, semantic input/output/cache-read tokens, and
+// the child's session window (started_at/ended_at/duration_ms from its own
+// transcript). `store` (optional) is the parent's resolved store. Numbers +
 // content-safe labels only. Returns [] if none / on any failure (never throws).
-function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
+function buildAntigravitySubagents(parentTranscriptPath, parentConversationId, store) {
   try {
-    const children = agyTokens.findChildren(parentConversationId);
+    const s = store || agyTokens.resolveStore(parentConversationId, parentTranscriptPath);
+    const children = agyTokens.findChildren(parentConversationId, s);
     if (!children.length) return [];
     const { names, roleByName } = extractSubagentDecls(parentTranscriptPath);
     const out = [];
     for (const childId of children) {
-      const agentType = agyTokens.readAgentType(childId, names);
+      const agentType =
+        agyTokens.readAgentType(childId, names, s) || agyTokens.readSummaryAgentName(childId, s);
       // One combined gen_metadata read for both usage and model, instead of
       // readUsageInputOutput()+readModel() each re-opening/re-scanning the DB.
-      const gen = agyTokens.readGenMetadata(childId);
-      const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0 };
+      const gen = agyTokens.readGenMetadata(childId, s);
+      const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0, cacheRead: 0 };
       const {
         tool_uses,
         tool_use_count,
@@ -437,7 +442,7 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
         ended_at,
         duration_ms,
         ...structFields // the 9-key structural line-count breakdown (counts only)
-      } = childStats(brainTranscriptPath(childId));
+      } = childStats(brainTranscriptPath(childId, s));
       out.push({
         agent_type: agentType ? cap(agentType, CAP_LABEL) : null,
         role: agentType && roleByName[agentType] ? roleByName[agentType] : null,
@@ -447,6 +452,7 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
         tool_use_count,
         input_tokens: usage.input,
         output_tokens: usage.output,
+        cache_read_tokens: usage.cacheRead,
         started_at,
         ended_at,
         duration_ms,

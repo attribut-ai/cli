@@ -3,19 +3,22 @@
 // ATTRIBUT — Google Antigravity token reader (ISOLATED, FAIL-SAFE).
 //
 // Antigravity does NOT expose token usage in its hook payload or its JSONL
-// transcript. The only local source is the per-conversation SQLite store at
-// ~/.gemini/antigravity-cli/conversations/<conversationId>.db, table
-// `gen_metadata` — one row PER MODEL GENERATION, each a protobuf blob carrying
-// that turn's usage (verified: path 1.4.2 ≈ prompt/input tokens, 1.4.3 ≈ output
+// transcript. The only local source is the per-conversation SQLite DB at
+// <store>/conversations/<conversationId>.db (see "store resolution" below for
+// which <store>), table `gen_metadata` — one row PER MODEL GENERATION, each a
+// protobuf blob carrying that turn's usage (verified: path 1.4.2 = uncached new
+// input tokens, 1.4.3 = output tokens, 1.4.5 = cached-prefix / cache-read input
 // tokens; values scale with real session size, unlike `executor_metadata` which
 // holds only static config/limits). We SUM each varint path across the small
 // per-generation rows to get session totals, and skip the oversized embedding
 // rows (the large blobs are model-context dumps, not usage).
 //
 // This module reads that DB and returns a `usage_raw` map of { "<dotted field
-// path>": integer }. It deliberately knows NOTHING about which field is input vs
-// output — that semantic mapping is reverse-engineered and applied server-side
-// in ingest_worker, so it can change without reshipping the collector.
+// path>": integer }. The session's own usage_raw ships RAW — the semantic
+// mapping is applied server-side in ingest_worker, so it can change without
+// reshipping the collector. The one client-side projection is for NESTED
+// subagents (usageInputOutput / USAGE_PATHS), whose tokens the contract carries
+// pre-labelled; USAGE_PATHS is the single place that path knowledge lives.
 //
 // THREE HARD GUARANTEES:
 //   1. CONTENT NEVER LEAKS. We emit ONLY varint (wire-type-0) values as integers.
@@ -32,6 +35,7 @@
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const { fileURLToPath } = require('url');
 
 // Bounds: agy's executor_metadata is ~3 KB. These caps stop a pathological blob
 // from blowing up memory/output and keep usage_raw within the schema's limits.
@@ -40,20 +44,115 @@ const MAX_ENTRIES = 128; // matches the schema's maxProperties on usage_raw
 // Per-generation usage rows are ~1-2 KB; the embedding/context dumps are 100 KB+.
 // Only walk rows at or below this size — the big rows are model context, not usage.
 const MAX_ROW_BYTES = 8192;
+// Sanity cap on subagent children nested under one parent (observed max is in
+// the tens). The contract's subagents array has no lower maxItems.
+const MAX_CHILDREN = 256;
 
-/** Conversations dir; override via AGY_CONVERSATIONS_DIR for tests. */
-function conversationsDir() {
-  return (
-    process.env.AGY_CONVERSATIONS_DIR ||
-    path.join(os.homedir(), '.gemini', 'antigravity-cli', 'conversations')
-  );
+// --- store resolution --------------------------------------------------------
+//
+// Each Antigravity surface keeps its own on-disk STORE, all with one layout:
+//   <root>/conversations/<id>.db          per-conversation SQLite (usage, model,
+//                                         generated title, parent link)
+//   <root>/brain/<id>/.system_generated/logs/transcript_full.jsonl
+//   <root>/conversation_summaries.db      store-level index (see SUMMARY_SAFE_COLUMNS)
+// Known roots under ~/.gemini, in priority order:
+//   antigravity       the Antigravity desktop app
+//   antigravity-cli   the `agy` terminal CLI
+//   antigravity-ide   the legacy Antigravity IDE
+// `antigravity-backup` is deliberately NOT a store (it is a copy of another one).
+//
+// On the live hook path the store is the one the hook's transcriptPath lives in
+// (authoritative). Otherwise — or when the path lacks that shape — it is the first
+// known store that holds <id>.db. A parent's subagent children are looked up in
+// the parent's own store.
+//
+// Test overrides: AGY_CONVERSATIONS_DIR pins ONE store (its conversations dir;
+// the summaries DB is that dir's sibling); AGY_BRAIN_DIR pins the brain dir;
+// AGY_STORE_ROOTS (path.delimiter-separated) replaces the known-root list.
+const STORE_ROOT_NAMES = Object.freeze(['antigravity', 'antigravity-cli', 'antigravity-ide']);
+const TRANSCRIPT_TAIL = Object.freeze(['.system_generated', 'logs', 'transcript_full.jsonl']);
+
+// A store descriptor rooted at `root`. opts.conversationsDir / opts.brainDir
+// replace the default <root>/conversations and <root>/brain.
+function storeAt(root, opts = {}) {
+  return {
+    root,
+    conversationsDir: opts.conversationsDir || path.join(root, 'conversations'),
+    brainDir: opts.brainDir || process.env.AGY_BRAIN_DIR || path.join(root, 'brain'),
+    summariesDb: path.join(root, 'conversation_summaries.db'),
+  };
 }
 
-/** Absolute DB path for a conversation id. basename-guards against traversal. */
-function dbPathFor(conversationId) {
+/** The known stores, in priority order (see "store resolution"). */
+function knownStores() {
+  const pinned = process.env.AGY_CONVERSATIONS_DIR;
+  if (pinned) return [storeAt(path.dirname(pinned), { conversationsDir: pinned })];
+  const roots = process.env.AGY_STORE_ROOTS
+    ? process.env.AGY_STORE_ROOTS.split(path.delimiter).filter(Boolean)
+    : STORE_ROOT_NAMES.map((n) => path.join(os.homedir(), '.gemini', n));
+  return roots.map((r) => storeAt(r));
+}
+
+/** Conversations dir of the highest-priority store (kept for callers/tests). */
+function conversationsDir() {
+  return knownStores()[0].conversationsDir;
+}
+
+// basename-guard a conversation id against traversal. null for an unusable id.
+function safeId(conversationId) {
   const safe = path.basename(String(conversationId || ''));
   if (!safe || safe === '.' || safe === '..') return null;
-  return path.join(conversationsDir(), `${safe}.db`);
+  return safe;
+}
+
+// The first known store that holds <id>.db, or null.
+function findStore(conversationId) {
+  const safe = safeId(conversationId);
+  if (!safe) return null;
+  for (const s of knownStores()) {
+    if (fs.existsSync(path.join(s.conversationsDir, `${safe}.db`))) return s;
+  }
+  return null;
+}
+
+// The store a transcript path belongs to, when it has the canonical shape
+// <root>/brain/<id>/.system_generated/logs/transcript_full.jsonl (and <id>
+// matches conversationId, when given). null otherwise, and always null while
+// AGY_CONVERSATIONS_DIR pins a single store.
+function storeFromTranscriptPath(transcriptPath, conversationId) {
+  if (process.env.AGY_CONVERSATIONS_DIR) return null;
+  if (typeof transcriptPath !== 'string' || !transcriptPath) return null;
+  let p = transcriptPath;
+  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+  p = path.resolve(p);
+  for (let i = TRANSCRIPT_TAIL.length - 1; i >= 0; i--) {
+    if (path.basename(p) !== TRANSCRIPT_TAIL[i]) return null;
+    p = path.dirname(p);
+  }
+  const idDir = p; // <root>/brain/<id>
+  const brainDir = path.dirname(idDir);
+  if (path.basename(brainDir) !== 'brain') return null;
+  const want = safeId(conversationId);
+  if (want && path.basename(idDir) !== want) return null; // another conversation's transcript
+  return storeAt(path.dirname(brainDir), { brainDir });
+}
+
+// The store a conversation lives in: the transcript's own store when the path
+// has the canonical shape, else the first known store holding <id>.db, else null.
+function resolveStore(conversationId, transcriptPath) {
+  return storeFromTranscriptPath(transcriptPath, conversationId) || findStore(conversationId);
+}
+
+/**
+ * Absolute DB path for a conversation id, in `store` when given, else in the
+ * first known store that holds it (else the highest-priority store's path,
+ * which may not exist). basename-guards against traversal.
+ */
+function dbPathFor(conversationId, store) {
+  const safe = safeId(conversationId);
+  if (!safe) return null;
+  const s = store || findStore(safe) || knownStores()[0];
+  return path.join(s.conversationsDir, `${safe}.db`);
 }
 
 // --- protobuf numbers-only walk ---------------------------------------------
@@ -221,12 +320,13 @@ function getDatabaseClass() {
 // id from a SINGLE pass over gen_metadata. readUsageRaw + readModel previously
 // opened + scanned these same rows separately; on the collector path that ran 3-4×
 // per session (parent + each child), so one combined pass halves the work per call.
-// Returns { usageRaw, model } — either may be null. READ-ONLY, fail-safe; never throws.
-function readGenMetadata(conversationId) {
+// Returns { usageRaw, model } — either may be null. `store` (optional) is the
+// conversation's resolved store. READ-ONLY, fail-safe; never throws.
+function readGenMetadata(conversationId, store) {
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return { usageRaw: null, model: null };
 
-  const dbPath = dbPathFor(conversationId);
+  const dbPath = dbPathFor(conversationId, store);
   if (!dbPath || !fs.existsSync(dbPath)) return { usageRaw: null, model: null };
 
   let db = null;
@@ -289,8 +389,8 @@ function readGenMetadata(conversationId) {
 // Read usage_raw for a conversation. Returns a { "<path>": int } object, or null
 // on ANY failure (missing/locked/corrupt DB, SQLite unavailable, no rows,
 // nothing extractable). NEVER throws. Thin wrapper over the combined single pass.
-function readUsageRaw(conversationId) {
-  return readGenMetadata(conversationId).usageRaw;
+function readUsageRaw(conversationId, store) {
+  return readGenMetadata(conversationId, store).usageRaw;
 }
 
 // The resolved model id is the ONE allowlisted label we read from the DB (like
@@ -305,8 +405,8 @@ const MODEL_ID_SCAN_RE = /\b(?:gemini|claude)-[a-z0-9][a-z0-9.-]{1,48}/gi;
 // combined single pass, which tallies model-id-shaped tokens across the small
 // per-generation gen_metadata rows and returns the most frequent one. READ-ONLY,
 // fail-safe (never throws).
-function readModel(conversationId) {
-  return readGenMetadata(conversationId).model;
+function readModel(conversationId, store) {
+  return readGenMetadata(conversationId, store).model;
 }
 
 // The generated session title — a short, model-produced summary (Title Case,
@@ -379,12 +479,17 @@ function looksLikeTitle(s) {
 // Read the generated session title for a conversation, or null. Scans the steps'
 // step_payload for the string at TITLE_PATH and returns the latest non-empty one
 // that passes the title shape-guard (the title is refined as the session grows).
-// READ-ONLY, fail-safe.
-function readTitle(conversationId) {
+// The desktop app does not write TITLE_PATH; when the scan yields nothing, fall
+// back to the store index's `title` column (readSummaryTitle). READ-ONLY, fail-safe.
+function readTitle(conversationId, store) {
+  return readStepTitle(conversationId, store) || readSummaryTitle(conversationId, store);
+}
+
+function readStepTitle(conversationId, store) {
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return null;
 
-  const dbPath = dbPathFor(conversationId);
+  const dbPath = dbPathFor(conversationId, store);
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
   let db = null;
@@ -417,6 +522,97 @@ function readTitle(conversationId) {
   }
 }
 
+// --- store index (conversation_summaries.db) ---------------------------------
+//
+// PRIVACY: the store index ALSO holds conversation CONTENT — `preview` (prompt/
+// response text), `raw_summary` (a serialized summary blob) and the
+// `conversations_fts*` full-text tables. We read ONLY the named columns in
+// SUMMARY_SAFE_COLUMNS, each by exact name in its own single-row SELECT keyed by
+// conversation_id: the generated `title` (same allowlisted field as TITLE_PATH),
+// the short subagent label `agent_name`, and the `workspace_uris` folder list
+// (the same repo path the hook's workspacePaths carries). NEVER `SELECT *`, never
+// select `preview`/`raw_summary`, never touch a `conversations_fts*` table. One
+// statement per column also means an older store schema missing a column only
+// nulls that field. READ-ONLY, fail-safe (missing/locked/corrupt DB → nulls).
+const SUMMARY_SAFE_COLUMNS = Object.freeze(['title', 'agent_name', 'workspace_uris']);
+
+// { <column>: string|null } for the requested allowlisted columns. A column
+// outside SUMMARY_SAFE_COLUMNS is never queried (stays null).
+function readSummaryColumns(conversationId, store, columns) {
+  const out = {};
+  for (const c of columns) out[c] = null;
+  const DatabaseSync = getDatabaseClass();
+  const safe = safeId(conversationId);
+  const s = store || findStore(safe);
+  if (!DatabaseSync || !safe || !s || !fs.existsSync(s.summariesDb)) return out;
+  let db = null;
+  try {
+    db = new DatabaseSync(s.summariesDb, { readOnly: true });
+    for (const c of columns) {
+      if (!SUMMARY_SAFE_COLUMNS.includes(c)) continue;
+      try {
+        const row = db
+          .prepare(`SELECT ${c} AS v FROM conversation_summaries WHERE conversation_id = ?`)
+          .get(safe);
+        if (row && typeof row.v === 'string' && row.v) out[c] = row.v;
+      } catch {
+        /* column/table absent in this store's schema — field stays null */
+      }
+    }
+  } catch {
+    /* locked / corrupt — all fields stay null */
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return out;
+}
+
+// The store index's generated title for a conversation, through the same
+// single-line shape-guard + 200-char cap as the TITLE_PATH scan. null if absent.
+function readSummaryTitle(conversationId, store) {
+  const v = readSummaryColumns(conversationId, store, ['title']).title;
+  const t = v && v.trim();
+  return t && looksLikeTitle(t) ? t.slice(0, 200) : null;
+}
+
+// Labels the store index uses that say nothing about the subagent's type:
+// `self` marks a fork of the parent agent itself.
+const UNINFORMATIVE_AGENT_NAMES = new Set(['self']);
+const MAX_LABEL = 128; // matches the schema's agent_type maxLength
+
+// A subagent child's short label from the store index (`agent_name`), or null
+// when absent, uninformative (`self`), or not label-shaped. Capped to MAX_LABEL.
+function readSummaryAgentName(conversationId, store) {
+  const v = readSummaryColumns(conversationId, store, ['agent_name']).agent_name;
+  const t = v && v.trim();
+  if (!t || !looksLikeTitle(t) || UNINFORMATIVE_AGENT_NAMES.has(t.toLowerCase())) return null;
+  return t.slice(0, MAX_LABEL);
+}
+
+// The first file:// workspace folder the store index recorded for a
+// conversation, decoded to a filesystem path, or null. `workspace_uris` is a JSON
+// array of URIs; non-file schemes are ignored.
+function readSummaryWorkspacePath(conversationId, store) {
+  const v = readSummaryColumns(conversationId, store, ['workspace_uris']).workspace_uris;
+  if (!v) return null;
+  try {
+    const uris = JSON.parse(v);
+    if (!Array.isArray(uris)) return null;
+    for (const u of uris) {
+      if (typeof u === 'string' && u.startsWith('file://')) return fileURLToPath(u);
+    }
+  } catch {
+    /* malformed JSON / URI */
+  }
+  return null;
+}
+
 // --- subagent linkage --------------------------------------------------------
 //
 // agy runs each subagent as a SEPARATE conversation (its own DB/transcript). The
@@ -429,12 +625,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PARENT_ID_PATH = '5'; // trajectory_metadata_blob → parent conversationId
 
 // Parent conversationId for a child, or null if this conversation is not a
-// subagent child. READ-ONLY, fail-safe.
-function readParentId(conversationId) {
+// subagent child. `store` (optional) is the child's resolved store. READ-ONLY,
+// fail-safe.
+function readParentId(conversationId, store) {
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return null;
 
-  const dbPath = dbPathFor(conversationId);
+  const dbPath = dbPathFor(conversationId, store);
   if (!dbPath || !fs.existsSync(dbPath)) return null;
   let db = null;
   try {
@@ -469,28 +666,42 @@ function readParentId(conversationId) {
   }
 }
 
-// Semantic input/output token totals for a conversation (the RE'd 1.4.2/1.4.3
-// paths). Used for nested subagents, whose tokens must be labelled client-side
-// (the parent's own tokens stay raw → server-mapped). { input, output } or null.
-// Project a usage_raw object to { input, output }. Pure — keeps the varint-path
-// knowledge (1.4.2 / 1.4.3) in one place so callers that already hold usage_raw
-// (from a combined readGenMetadata) don't re-read the DB just to map it.
+// The reverse-engineered semantic paths inside a usage_raw map (per-generation
+// sums). THE one place this knowledge lives on the client — used only to label
+// nested subagents' tokens (the session's own usage_raw stays raw → server-mapped).
+//   input     1.4.2  uncached new input tokens
+//   output    1.4.3  output tokens
+//   cacheRead 1.4.5  cached-prefix (cache-read) input tokens
+// proto3 omits zero-valued varints, so an absent path means 0 for that turn.
+const USAGE_PATHS = Object.freeze({ input: '1.4.2', output: '1.4.3', cacheRead: '1.4.5' });
+
+// Project a usage_raw object to { input, output, cacheRead }, or null. Pure, so
+// callers that already hold usage_raw (from a combined readGenMetadata) don't
+// re-read the DB just to map it.
 function usageInputOutput(usageRaw) {
   if (!usageRaw) return null;
-  return { input: usageRaw['1.4.2'] || 0, output: usageRaw['1.4.3'] || 0 };
+  return {
+    input: usageRaw[USAGE_PATHS.input] || 0,
+    output: usageRaw[USAGE_PATHS.output] || 0,
+    cacheRead: usageRaw[USAGE_PATHS.cacheRead] || 0,
+  };
 }
 
-function readUsageInputOutput(conversationId) {
-  return usageInputOutput(readUsageRaw(conversationId));
+function readUsageInputOutput(conversationId, store) {
+  return usageInputOutput(readUsageRaw(conversationId, store));
 }
 
-// Find the child conversationIds whose parent is `parentId` (reverse scan of the
-// conversations dir). Bounded. READ-ONLY, fail-safe → [] on any error.
-function findChildren(parentId) {
+// Find the child conversationIds whose parent is `parentId`: a reverse scan of
+// the PARENT's own store (`store`, else the first known store holding the
+// parent; none → []). Bounded by MAX_CHILDREN. READ-ONLY, fail-safe → [] on any
+// error.
+function findChildren(parentId, store) {
   if (!parentId) return [];
+  const s = store || findStore(parentId);
+  if (!s) return [];
   let entries;
   try {
-    entries = fs.readdirSync(conversationsDir());
+    entries = fs.readdirSync(s.conversationsDir);
   } catch {
     return [];
   }
@@ -500,11 +711,11 @@ function findChildren(parentId) {
     const id = name.slice(0, -3);
     if (id === parentId) continue;
     try {
-      if (readParentId(id) === parentId) children.push(id);
+      if (readParentId(id, s) === parentId) children.push(id);
     } catch {
       /* skip */
     }
-    if (children.length >= 64) break; // sanity cap
+    if (children.length >= MAX_CHILDREN) break; // sanity cap
   }
   return children;
 }
@@ -512,12 +723,12 @@ function findChildren(parentId) {
 // Which of the known `candidateNames` (the parent's declared subagent names)
 // appears in this child's gen_metadata — i.e. the child's agent_type. We match
 // only against the KNOWN content-safe labels, never free text. null if none.
-function readAgentType(conversationId, candidateNames) {
+function readAgentType(conversationId, candidateNames, store) {
   if (!Array.isArray(candidateNames) || candidateNames.length === 0) return null;
   const DatabaseSync = getDatabaseClass();
   if (!DatabaseSync) return null;
 
-  const dbPath = dbPathFor(conversationId);
+  const dbPath = dbPathFor(conversationId, store);
   if (!dbPath || !fs.existsSync(dbPath)) return null;
   let db = null;
   try {
@@ -549,40 +760,56 @@ function readAgentType(conversationId, candidateNames) {
   }
 }
 
-// List EVERY top-level agy conversation id (subagent children excluded — they
-// fold into their parent). Returns [{ id, mtimeMs }] newest-first by mtime.
-// READ-ONLY, fail-safe → [] on any error. Never throws.
+// List EVERY top-level agy conversation across ALL known stores (subagent
+// children excluded — they fold into their parent). An id present in more than
+// one store is listed once, from the store whose DB has the newest mtime; an id
+// that is a child in any store is excluded. Returns [{ id, mtimeMs, store }]
+// newest-first by mtime — `store` lets the caller build the transcript path in the
+// matching store. READ-ONLY, fail-safe → [] on any error. Never throws.
 function listConversationIds() {
-  let entries;
-  try {
-    entries = fs.readdirSync(conversationsDir());
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const name of entries) {
-    if (!name.endsWith('.db')) continue;
-    const id = name.slice(0, -3);
-    let parentId;
+  const byId = new Map();
+  const childIds = new Set();
+  for (const store of knownStores()) {
+    let entries;
     try {
-      parentId = readParentId(id);
+      entries = fs.readdirSync(store.conversationsDir);
     } catch {
-      parentId = null; // failed lookup → don't drop a real session, include it
+      continue; // store absent on this machine
     }
-    if (parentId) continue; // has a parent → subagent child, exclude
-    let mtimeMs;
-    try {
-      mtimeMs = fs.statSync(dbPathFor(id)).mtimeMs;
-    } catch {
-      continue; // stat failed → skip this id
+    for (const name of entries) {
+      if (!name.endsWith('.db')) continue;
+      const id = name.slice(0, -3);
+      let parentId;
+      try {
+        parentId = readParentId(id, store);
+      } catch {
+        parentId = null; // failed lookup → don't drop a real session, include it
+      }
+      if (parentId) {
+        childIds.add(id); // has a parent → subagent child, exclude
+        continue;
+      }
+      let mtimeMs;
+      try {
+        mtimeMs = fs.statSync(path.join(store.conversationsDir, name)).mtimeMs;
+      } catch {
+        continue; // stat failed → skip this copy
+      }
+      const prev = byId.get(id);
+      if (!prev || mtimeMs > prev.mtimeMs) byId.set(id, { id, mtimeMs, store });
     }
-    out.push({ id, mtimeMs });
   }
+  const out = [...byId.values()].filter((d) => !childIds.has(d.id));
   out.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return out;
 }
 
 module.exports = {
+  STORE_ROOT_NAMES,
+  knownStores,
+  findStore,
+  storeFromTranscriptPath,
+  resolveStore,
   conversationsDir,
   dbPathFor,
   readVarint,
@@ -594,12 +821,18 @@ module.exports = {
   readUsageRaw,
   readModel,
   readTitle,
+  readSummaryTitle,
+  readSummaryAgentName,
+  readSummaryWorkspacePath,
   readParentId,
+  USAGE_PATHS,
   usageInputOutput,
   readUsageInputOutput,
   findChildren,
   readAgentType,
   getDatabaseClass,
   listConversationIds,
+  SUMMARY_SAFE_COLUMNS,
+  MAX_CHILDREN,
   TITLE_PATH,
 };

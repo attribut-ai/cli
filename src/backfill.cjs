@@ -116,6 +116,8 @@ function enumerate(agentSlug) {
         return listSessionRollouts().map((d) => ({ ...d, whenMs: d.mtimeMs }));
       }
       case 'agy': {
+        // Every known store (desktop app, terminal CLI, legacy IDE), children
+        // excluded, an id present in several stores listed once (newest DB wins).
         const { listConversationIds } = require('./parser/antigravity_tokens.cjs');
         return listConversationIds().map((d) => ({ ...d, whenMs: d.mtimeMs }));
       }
@@ -263,8 +265,11 @@ function syntheticHook(agentSlug, d) {
     case 'codex':
       return { transcript_path: d.path, session_id: d.sessionId || null, cwd: null, reason: 'backfill' };
     case 'agy': {
+      // Transcript in the store the enumerator found the conversation in. No
+      // workspacePaths: the builder falls back to the store index's recorded
+      // workspace, then the transcript's run_command Cwd.
       const { brainTranscriptPath } = require('./parser/antigravity_cli.cjs');
-      return { transcriptPath: brainTranscriptPath(d.id), conversationId: d.id, workspacePaths: [] };
+      return { transcriptPath: brainTranscriptPath(d.id, d.store), conversationId: d.id, workspacePaths: [] };
     }
     case 'cursor':
       return {

@@ -217,6 +217,7 @@
                   "tool_use_count": { "type": ["integer", "null"], "minimum": 0 },
                   "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
                   "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+                  "cache_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
                   "started_at": { "type": ["string", "null"], "format": "date-time" },
                   "ended_at": { "type": ["string", "null"], "format": "date-time" },
                   "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
