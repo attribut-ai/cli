@@ -539,10 +539,13 @@ function buildEnvelopeFromHook(hook, { trigger, source }) {
   });
 }
 
-// Build the envelope from a Google Antigravity hook object. agy's hook stdin is
-// shaped differently from Claude's: { conversationId, transcriptPath, toolCall,
-// workspacePaths, artifactDirectoryPath, stepIdx, error }. Token usage is NOT in
-// the hook or the transcript — we read it (fail-safe, numbers-only) from the
+// Build the envelope from a Google Antigravity hook object (PostToolUse or Stop).
+// agy's hook stdin is camelCase and shaped differently from Claude's: common
+// fields { conversationId, transcriptPath, workspacePaths, artifactDirectoryPath,
+// modelName, hookEventName, cwd, lastUserInput } plus per-event extras. We read
+// ONLY conversationId, transcriptPath and workspacePaths here — never
+// `lastUserInput` (prompt text) or any other free-text field. Token usage is NOT
+// in the hook or the transcript — we read it (fail-safe, numbers-only) from the
 // per-conversation SQLite store and inject usage_raw. THROWS on parse/validation
 // failure (the caller swallows on the hot path).
 function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
@@ -551,10 +554,17 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     throw new Error('antigravity hook has no transcriptPath.');
   }
   const conversationId = hook.conversationId || null;
-  const repo =
+  // The on-disk store this conversation lives in (desktop app / terminal CLI /
+  // legacy IDE): the transcriptPath's own store when it has the canonical brain
+  // shape, else the first known store holding its DB. null → readers search.
+  const store = conversationId ? agyTokens.resolveStore(conversationId, tp) : null;
+  let repo =
     Array.isArray(hook.workspacePaths) && hook.workspacePaths.length
       ? hook.workspacePaths[0]
       : null;
+  // No hook workspace (e.g. backfill's synthetic hook) → the workspace folder the
+  // store index recorded, ahead of the parser's transcript run_command Cwd fallback.
+  if (!repo && conversationId) repo = agyTokens.readSummaryWorkspacePath(conversationId, store);
 
   const payload = agyParser.parseAntigravityTranscript(tp, {
     sessionId: conversationId,
@@ -569,16 +579,19 @@ function buildAntigravityEnvelopeFromHook(hook, { trigger, source }) {
     // One combined read of gen_metadata (usage_raw + model in a single DB
     // open/parse) instead of readUsageRaw()+readModel(), which each re-opened and
     // re-scanned the same rows. Runs on every PostToolUse fire, so it matters.
-    const gen = agyTokens.readGenMetadata(conversationId);
+    const gen = agyTokens.readGenMetadata(conversationId, store);
     payload.antigravity.usage_raw = gen.usageRaw;
     if (!payload.model) payload.model = gen.model;
     // The generated session title (agy's content-derived summary; readTitle caps
     // to the schema's 200) — same allowlisted exception as Claude's ai-title.
-    if (!payload.title) payload.title = agyTokens.readTitle(conversationId);
+    if (!payload.title) payload.title = agyTokens.readTitle(conversationId, store);
     // Nest this session's subagents (agy runs each as a separate conversation;
     // their standalone posts are suppressed in main()). Folds in their tokens
-    // server-side. tp is the parent transcript.
-    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId);
+    // server-side. tp is the parent transcript; children live in its store.
+    payload.antigravity.subagents = agyParser.buildAntigravitySubagents(tp, conversationId, store);
+    // Subagents do much of the committing; their SHAs never reach the parent
+    // transcript. Fold them into the session's commitSHA (ahead of the parent's).
+    payload.commitSHA = agyParser.foldSubagentShas(payload.commitSHA, payload.antigravity.subagents);
   } else {
     payload.antigravity.usage_raw = null;
   }
@@ -887,7 +900,9 @@ async function main() {
   try {
     hook = JSON.parse(stdinRaw);
   } catch (err) {
-    log(`could not parse hook JSON from stdin: ${err.message}`);
+    // Never echo err.message: V8's JSON.parse errors quote a fragment of the raw
+    // input, and hook stdin can carry prompt text (e.g. agy's lastUserInput).
+    log(`could not parse hook JSON from stdin (${err.name}, ${stdinRaw.length} bytes)`);
     return 0;
   }
 
@@ -919,17 +934,21 @@ async function main() {
     // Subagents run as their OWN conversations and fire their own hooks. Suppress
     // a subagent child's standalone post — it is nested into its parent's session
     // (payload.antigravity.subagents[]) instead, so it doesn't surface as a
-    // separate session. Detection: the child stores its parent id in the DB.
+    // separate session. Detection: the child stores its parent id in the DB,
+    // read from the child's own store (resolved from its transcriptPath).
     if (!dryRun) {
-      const parentId = agyTokens.readParentId(hook.conversationId);
+      const childStore = agyTokens.resolveStore(hook.conversationId, hook.transcriptPath);
+      const parentId = agyTokens.readParentId(hook.conversationId, childStore);
       if (parentId) {
         log(`suppressing subagent child ${hook.conversationId} (parent ${parentId})`);
         return 0;
       }
     }
-    // agy posts a cumulative snapshot on each PostToolUse (no payload-bearing
-    // session-end event exists); the server reconciles by sessionId. No Claude
-    // cursor gate — the transcript + token DB are small.
+    // agy posts a cumulative snapshot on each PostToolUse and on Stop (the
+    // execution loop ending — agy has no SessionEnd); the server reconciles by
+    // sessionId. No Claude cursor gate — the transcript + token DB are small.
+    // Nothing is written to stdout here: on Stop, a stdout
+    // {"decision":"continue"} would block the agent from stopping.
     try {
       envelope = buildAntigravityEnvelopeFromHook(hook, { trigger, source });
     } catch (err) {
@@ -1083,15 +1102,46 @@ const MANAGEMENT_COMMANDS = new Set([
   'update',
 ]);
 
+// Resolve once everything already written to `stream` has been handed to the OS.
+// Pipe writes are asynchronous on POSIX, so a process.exit() straight after a
+// large write() truncated a piped stdout at the pipe buffer (64 KB on macOS) —
+// `--dry-run`, `--parse` and `backfill --dry-run` printed invalid JSON. An empty
+// write queues behind the pending data and its callback fires once that data is
+// flushed. Nothing pending (the hook hot path writes nothing to stdout) → resolves
+// at once, writing nothing. The bound is only a safety net against a reader that
+// never drains; a normal reader takes milliseconds.
+const DRAIN_TIMEOUT_MS = 10000;
+function drain(stream) {
+  return new Promise((resolve) => {
+    if (!stream || stream.destroyed || !stream.writable || !stream.writableLength) return resolve();
+    const timer = setTimeout(resolve, DRAIN_TIMEOUT_MS);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    try {
+      stream.write('', done);
+    } catch {
+      done();
+    }
+  });
+}
+
+async function exitAfterFlush(code) {
+  await Promise.all([drain(process.stdout), drain(process.stderr)]);
+  process.exit(code);
+}
+
 // Top-level: a normally-returned code is honored. An UNCAUGHT error is logged;
 // then we exit non-zero for the fail-loud management subcommands and exit 0 for
-// the hook hot path (telemetry must never break the user's session).
+// the hook hot path (telemetry must never break the user's session). Every exit
+// first flushes stdout/stderr, so printed payloads of any size arrive whole.
 if (require.main === module) {
   main()
-    .then((code) => process.exit(typeof code === 'number' ? code : 0))
+    .then((code) => exitAfterFlush(typeof code === 'number' ? code : 0))
     .catch((err) => {
       log(`unexpected error: ${err && err.message ? err.message : err}`);
-      process.exit(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
+      return exitAfterFlush(MANAGEMENT_COMMANDS.has(process.argv[2]) ? 1 : 0);
     });
 }
 

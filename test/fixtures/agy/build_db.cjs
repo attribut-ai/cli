@@ -36,13 +36,16 @@ function varintField(field, n) {
 }
 
 // Encode one generation's gen_metadata row:
-//   field1 { field4 { field2=input, field3=output, field9="<contentSentinel>" } }
-// → token paths 1.4.2 / 1.4.3; the sentinel sits at a length-delimited field the
-// numbers-only walk must skip.
-function encodeGenRow({ input, output, contentSentinel, model, agentType }) {
+//   field1 { field4 { field2=input, field3=output, field5=cacheRead?,
+//                     field9="<contentSentinel>" } }
+// → token paths 1.4.2 / 1.4.3 / 1.4.5; the sentinel sits at a length-delimited
+// field the numbers-only walk must skip. cacheRead is omitted when absent/0 (as
+// proto3 omits zero-valued varints).
+function encodeGenRow({ input, output, cacheRead, contentSentinel, model, agentType }) {
   const usage = Buffer.concat([
     varintField(2, input),
     varintField(3, output),
+    cacheRead ? varintField(5, cacheRead) : Buffer.alloc(0),
     lenField(9, contentSentinel),
   ]);
   const field4 = lenField(4, usage);
@@ -73,9 +76,10 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
       /* absent */
     }
   }
+  // opts.rows: [] (empty) builds a DB whose only generation is opts.bigUsageRow.
   const rows =
     opts.rows ||
-    [{ input: opts.input != null ? opts.input : 1234, output: opts.output != null ? opts.output : 567, contentSentinel: opts.contentSentinel || 'DB_CONTENT_SECRET' }];
+    [{ input: opts.input != null ? opts.input : 1234, output: opts.output != null ? opts.output : 567, cacheRead: opts.cacheRead, contentSentinel: opts.contentSentinel || 'DB_CONTENT_SECRET' }];
 
   const db = new DatabaseSync(dbPath);
   db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER DEFAULT 0)');
@@ -85,11 +89,34 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
     const blob = encodeGenRow({
       input: r.input,
       output: r.output,
+      cacheRead: r.cacheRead,
       contentSentinel: r.contentSentinel || 'DB_CONTENT_SECRET',
       model: r.model || opts.model,
       agentType: r.agentType || opts.agentType,
     });
     stmt.run(idx++, blob, blob.length);
+  }
+  if (opts.bigUsageRow) {
+    // The LATEST generation's row as the real store writes it: past MAX_ROW_BYTES
+    // because it also carries the model-context dump. Layout:
+    //   1 { 4 { 2=input, 3=output, 5=cacheRead }   ← usage (must be counted)
+    //       19 = "<model id>"                       ← fixed model-id path
+    //       7 { 1=<dumpVarint>, 2="<dump text>" } } ← context dump (never read)
+    // The dump repeats a model-id-shaped decoy and a content sentinel, and holds a
+    // varint, so a whole-row walk or text scan would visibly misbehave.
+    const u = opts.bigUsageRow;
+    const usage = Buffer.concat([
+      varintField(2, u.input),
+      varintField(3, u.output),
+      u.cacheRead ? varintField(5, u.cacheRead) : Buffer.alloc(0),
+    ]);
+    const dumpText = `${u.dumpText || 'BIG_ROW_DUMP_SECRET'} claude-dump-decoy-model `.repeat(400);
+    const dump = Buffer.concat([varintField(1, u.dumpVarint || 8888888), lenField(2, dumpText)]);
+    const big = lenField(
+      1,
+      Buffer.concat([lenField(4, usage), lenField(19, u.model || 'gemini-3-flash-a'), lenField(7, dump)])
+    );
+    stmt.run(idx++, big, big.length);
   }
   if (opts.bigRow) {
     // An oversized "embedding" row carrying a sentinel + huge varints; the reader
@@ -127,4 +154,63 @@ function buildSyntheticDb(dir, conversationId, opts = {}) {
   return dbPath;
 }
 
-module.exports = { buildSyntheticDb, encodeGenRow };
+// Create <storeRoot>/conversation_summaries.db — the store-level index the
+// desktop app keeps. Mirrors the real column set, INCLUDING the content-bearing
+// columns (`preview`, `raw_summary`) and a full-text content table, so tests can
+// plant sentinels there and prove the reader never selects them. `rows` items:
+// { conversation_id, title?, preview?, raw_summary?, agent_name?,
+//   parent_conversation_id?, workspace_uris? (array → JSON; a string is stored
+//   verbatim, for malformed-value tests), fts? (planted in the full-text table) }.
+// opts.legacy builds an older schema WITHOUT agent_name / workspace_uris, to
+// prove every column read is fail-safe on its own.
+function buildSummariesDb(storeRoot, rows, opts = {}) {
+  const { getDatabaseClass } = require('../../../src/parser/antigravity_tokens.cjs');
+  const DatabaseSync = getDatabaseClass();
+  if (!DatabaseSync) throw new Error('No SQLite driver available (node:sqlite)');
+  fs.mkdirSync(storeRoot, { recursive: true });
+  const dbPath = path.join(storeRoot, 'conversation_summaries.db');
+  try {
+    fs.unlinkSync(dbPath);
+  } catch {
+    /* absent */
+  }
+  const db = new DatabaseSync(dbPath);
+  const cols = opts.legacy
+    ? ['conversation_id', 'title', 'preview', 'parent_conversation_id', 'raw_summary']
+    : ['conversation_id', 'title', 'preview', 'agent_name', 'parent_conversation_id', 'workspace_uris', 'raw_summary'];
+  db.exec(
+    `CREATE TABLE conversation_summaries (${cols
+      .map((c) => (c === 'raw_summary' ? 'raw_summary BLOB' : `${c} TEXT NOT NULL DEFAULT ''`))
+      .join(', ')}, PRIMARY KEY (conversation_id))`
+  );
+  db.exec('CREATE TABLE conversations_fts_content (id INTEGER PRIMARY KEY, c0 TEXT, c1 TEXT)');
+  const insert = db.prepare(
+    `INSERT INTO conversation_summaries (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`
+  );
+  const fts = db.prepare('INSERT INTO conversations_fts_content (c0, c1) VALUES (?, ?)');
+  for (const r of rows) {
+    const values = cols.map((c) => {
+      if (c === 'workspace_uris') {
+        return typeof r.workspace_uris === 'string' ? r.workspace_uris : JSON.stringify(r.workspace_uris || []);
+      }
+      if (c === 'raw_summary') return Buffer.from(r.raw_summary || '');
+      return r[c] != null ? String(r[c]) : '';
+    });
+    insert.run(...values);
+    if (r.fts) fts.run(r.conversation_id, r.fts);
+  }
+  db.close();
+  return dbPath;
+}
+
+// Write <brainDir>/<id>/.system_generated/logs/transcript_full.jsonl (the
+// canonical transcript location inside a store). `content` is the raw JSONL.
+function writeBrainTranscript(brainDir, conversationId, content) {
+  const dir = path.join(brainDir, conversationId, '.system_generated', 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, 'transcript_full.jsonl');
+  fs.writeFileSync(p, content);
+  return p;
+}
+
+module.exports = { buildSyntheticDb, buildSummariesDb, writeBrainTranscript, encodeGenRow };

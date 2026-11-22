@@ -12,16 +12,23 @@
 // and the line LENGTH leave, as integers.
 //
 // Token usage is NOT in the transcript (it lives only in the per-conversation
-// SQLite store). The collector fills payload.antigravity.usage_raw separately
-// via the fail-safe token module; this parser sets it null.
+// SQLite DB of the conversation's store — desktop app, terminal CLI or legacy
+// IDE; see antigravity_tokens.cjs). The collector fills
+// payload.antigravity.usage_raw separately via the fail-safe token module; this
+// parser sets it null.
 //
-// Transcript shape (one JSON object per line, verified against agy 1.0.8):
+// Transcript shape (one JSON object per line):
 //   { type, source, status, step_index, created_at, content?, tool_calls?,
 //     thinking?, error? }
 //   - model turns: type "PLANNER_RESPONSE", source "MODEL", optional
 //     tool_calls: [{ name, args:{...} }]
-//   - tool results: typed steps (RUN_COMMAND, CODE_ACTION, LIST_DIRECTORY, ...),
-//     whose `content` is the (string) tool output.
+//   - tool results, terminal CLI (verified against agy 1.0.8): typed steps
+//     (RUN_COMMAND, CODE_ACTION, LIST_DIRECTORY, ...) whose `content` is the
+//     (string) tool output; file tools write_to_file / replace_file_content /
+//     multi_replace_file_content.
+//   - tool results, desktop app: every result is a GENERIC step, in call order
+//     right after its PLANNER_RESPONSE (no id links them); file tools write_file /
+//     edit_file; run_command carries no Cwd.
 
 const fs = require('fs');
 const path = require('path');
@@ -109,17 +116,39 @@ function applyReplace(target, before, after, struct) {
 }
 
 // Accumulate structural line counts from a file-changing tool call into `struct`
-// (the 9-key integer accumulator). Handles:
+// (the 9-key integer accumulator). Handles both transcript formats:
+//   terminal CLI
 //   - write_to_file: whole new content (args.CodeContent) → all added.
 //   - replace_file_content: before (args.TargetContent) → after
 //     (args.ReplacementContent), diffed to precise +/- lines.
 //   - multi_replace_file_content: an array of such chunks (best-effort).
+//   desktop app
+//   - write_file: args.Content on args.Path → all added. That holds for a new
+//     file, an `Append` (the appended lines are the change) and an `Overwrite`
+//     (the prior content isn't in the transcript, so — like write_to_file — only
+//     the written lines are counted).
+//   - edit_file: before (args.Target) → after (args.Replacement) on args.Path,
+//     diffed to precise +/- lines.
+//   Calls carrying `ArtifactMetadata` are the agent's own plan/notes artifacts
+//   (markdown in its brain dir), not work product, and are not counted.
 // Reads content ONLY to classify + measure; never retains or emits it.
 function accumulateFileChange(toolCall, struct) {
   if (!toolCall || typeof toolCall !== 'object') return;
   const args = toolCall.args;
   if (!args || typeof args !== 'object') return;
 
+  if (toolCall.name === 'write_file') {
+    if (args.ArtifactMetadata != null) return;
+    if (typeof args.Content === 'string' && typeof args.Path === 'string' && !isGeneratedPath(args.Path)) {
+      classifyInto(splitLines(args.Content), syntaxForPath(args.Path), 'add', struct);
+    }
+    return;
+  }
+  if (toolCall.name === 'edit_file') {
+    if (args.ArtifactMetadata != null) return;
+    applyReplace(args.Path, args.Target, args.Replacement, struct);
+    return;
+  }
   if (toolCall.name === 'write_to_file') {
     if (
       typeof args.CodeContent === 'string' &&
@@ -164,6 +193,84 @@ function extractShasFromRunCommand(content) {
   return found;
 }
 
+// Collect git commit SHAs (and their bracket branches) from COMMAND OUTPUT only,
+// in both transcript formats. Feed every parsed transcript line to step(); call
+// finish() once at the end.
+//   - terminal CLI: command output is a typed RUN_COMMAND step's `content`.
+//   - desktop app: every tool result is a GENERIC step. The GENERIC steps between
+//     a PLANNER_RESPONSE with k tool_calls and the next PLANNER_RESPONSE are those
+//     calls' results IN CALL ORDER (verified on real transcripts: counts match in
+//     all but a handful of groups, and results never appear out of order). Only
+//     the results of `run_command` calls are scanned — never a file read or any
+//     other tool's result — and a group whose result count doesn't match its call
+//     count is skipped rather than guessed.
+// Same posture as the Claude parser (Bash stdout only): the command line / tool
+// args are never read here, and only the SHA + its bracket line (for the branch)
+// leave the scan.
+function newCommitTracker() {
+  const shas = new Set();
+  const branches = new Set();
+  let group = null; // { calls: [toolName], results: [content|null] } for the open planner step
+
+  const scan = (content) => {
+    for (const hit of extractShasFromRunCommand(content)) {
+      shas.add(hit.sha);
+      const b = branchFromBracketLine(hit.line);
+      if (b) branches.add(b);
+    }
+  };
+  const flush = () => {
+    if (group && group.results.length === group.calls.length) {
+      group.calls.forEach((name, i) => {
+        if (name === 'run_command') scan(group.results[i]);
+      });
+    }
+    group = null;
+  };
+
+  return {
+    step(o) {
+      if (!o || typeof o !== 'object') return;
+      if (o.type === 'RUN_COMMAND') {
+        scan(o.content);
+      } else if (o.type === 'PLANNER_RESPONSE') {
+        flush();
+        if (Array.isArray(o.tool_calls) && o.tool_calls.length) {
+          group = { calls: o.tool_calls.map((c) => (c && typeof c.name === 'string' ? c.name : null)), results: [] };
+        }
+      } else if (o.type === 'GENERIC' && group) {
+        // Keep only what a run_command result position needs; drop the rest now.
+        const isCommand = group.calls[group.results.length] === 'run_command';
+        group.results.push(isCommand && typeof o.content === 'string' ? o.content : null);
+      }
+    },
+    finish() {
+      flush();
+      return { shas: [...shas], branches: [...branches] };
+    },
+  };
+}
+
+// Union subagent-observed commit SHAs into the session-level commitSHA (mirrors
+// the Claude parser). Subagents do much of the committing and their output never
+// appears in the parent transcript. Child SHAs are PREPENDED: ingest takes the
+// session's primary commit from commitSHA[-1], so a child SHA must never displace
+// the parent's most recent commit. De-duplicated, order-preserving.
+function foldSubagentShas(parentShas, subagents) {
+  const parent = Array.isArray(parentShas) ? parentShas : [];
+  const seen = new Set(parent);
+  const fromChildren = [];
+  for (const sa of subagents || []) {
+    for (const sha of (sa && sa.commit_shas) || []) {
+      if (typeof sha === 'string' && sha && !seen.has(sha)) {
+        seen.add(sha);
+        fromChildren.push(sha);
+      }
+    }
+  }
+  return fromChildren.length ? [...fromChildren, ...parent] : parent;
+}
+
 // Parse a single agy `transcript_full.jsonl` into the contract antigravity
 // payload. `extra` may override { sessionId, repo, device_uuid } (the collector
 // passes conversationId + workspace from the hook). THROWS on unreadable/garbage
@@ -180,10 +287,9 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
   let tMax = null;
   let numTurns = 0; // count of model PLANNER_RESPONSE steps
   const toolUseCounts = new Map(); // tool name -> count (names only)
-  const shaSet = new Set();
-  const bracketBranches = new Set();
+  const commits = newCommitTracker(); // SHAs + bracket branches from command output
   const struct = newStructAccumulator();
-  let cwdFromCommand = null; // fallback repo: a run_command Cwd
+  let cwdFromCommand = null; // fallback repo: a run_command Cwd (terminal CLI only)
 
   for (const line of lines) {
     let o;
@@ -229,15 +335,10 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
       }
     }
 
-    // git commit SHAs live in RUN_COMMAND result content (command output).
-    if (o.type === 'RUN_COMMAND') {
-      for (const hit of extractShasFromRunCommand(o.content)) {
-        shaSet.add(hit.sha);
-        const b = branchFromBracketLine(hit.line);
-        if (b) bracketBranches.add(b);
-      }
-    }
+    // git commit SHAs live in command output (RUN_COMMAND step / run_command result).
+    commits.step(o);
   }
+  const { shas, branches } = commits.finish();
 
   const startedAt = tMin !== null ? new Date(tMin).toISOString() : null;
   const endedAt = tMax !== null ? new Date(tMax).toISOString() : null;
@@ -249,7 +350,7 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
   }));
   const num_tool_calls = tool_uses.reduce((acc, t) => acc + t.count, 0);
 
-  const branch = bracketBranches.size > 0 ? [...bracketBranches][0] : null;
+  const branch = branches.length > 0 ? branches[0] : null;
   const repo = extra.repo || cwdFromCommand || null;
 
   const payload = {
@@ -270,7 +371,7 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
     duration_ms: durationMs,
     repo: cap(repo, CAP_REPO),   // full cwd/path (folder->org attribution)
     branch: cap(branch, CAP_PATH),
-    commitSHA: [...shaSet],
+    commitSHA: shas, // the collector folds nested subagents' SHAs in ahead of these
     num_turns: numTurns,
     num_tool_calls,
     tool_uses,
@@ -287,14 +388,13 @@ function parseAntigravityTranscript(transcriptPath, extra = {}) {
   return payload;
 }
 
-// Brain transcript path for a conversation id (sibling of the conversations dir).
-// AGY_BRAIN_DIR overrides for tests.
-function brainTranscriptPath(conversationId) {
-  const base =
-    process.env.AGY_BRAIN_DIR ||
-    path.join(path.dirname(agyTokens.conversationsDir()), 'brain');
+// Brain transcript path for a conversation id, inside the conversation's store
+// (`store` when given, else the first known store holding its DB, else the
+// highest-priority store). AGY_BRAIN_DIR overrides the brain dir for tests.
+function brainTranscriptPath(conversationId, store) {
+  const s = store || agyTokens.findStore(conversationId) || agyTokens.knownStores()[0];
   return path.join(
-    base,
+    s.brainDir,
     path.basename(String(conversationId || '')),
     '.system_generated',
     'logs',
@@ -354,7 +454,9 @@ function extractSubagentDecls(parentTranscriptPath) {
 // stats). The structural counts reuse the SAME accumulateFileChange classifier
 // the session-level parse path uses (classifyInto/applyReplace under the hood),
 // run over this CHILD's own transcript file-change tool calls only — never the
-// parent's or the repo. Names, counts, and timestamps only; content is
+// parent's or the repo. Also the child's own commit SHAs + bracket branch, from
+// its command output only (newCommitTracker — subagents do much of the
+// committing). Names, counts, timestamps, SHAs and a branch only; content is
 // classified + measured in memory then discarded. Fail-safe: returns
 // empty/null/zeroed fields on any error.
 function childStats(childTranscriptPath) {
@@ -362,6 +464,7 @@ function childStats(childTranscriptPath) {
   let tMin = null;
   let tMax = null;
   const struct = newStructAccumulator();
+  const commits = newCommitTracker();
   let raw;
   try {
     raw = fs.readFileSync(expandHome(childTranscriptPath), 'utf8');
@@ -372,6 +475,8 @@ function childStats(childTranscriptPath) {
       started_at: null,
       ended_at: null,
       duration_ms: null,
+      commit_shas: [],
+      branch: null,
       ...newStructAccumulator(),
     };
   }
@@ -386,6 +491,7 @@ function childStats(childTranscriptPath) {
           if (tMax === null || t > tMax) tMax = t;
         }
       }
+      commits.step(o);
       if (!Array.isArray(o.tool_calls)) continue;
       for (const call of o.tool_calls) {
         if (call && typeof call.name === 'string') {
@@ -402,42 +508,53 @@ function childStats(childTranscriptPath) {
   }
   const tool_uses = [...counts.entries()].map(([name, count]) => ({ name, count }));
   const tool_use_count = tool_uses.reduce((acc, t) => acc + t.count, 0);
+  const { shas, branches } = commits.finish();
   return {
     tool_uses,
     tool_use_count,
     started_at: tMin !== null ? new Date(tMin).toISOString() : null,
     ended_at: tMax !== null ? new Date(tMax).toISOString() : null,
     duration_ms: tMin !== null && tMax !== null ? tMax - tMin : null,
+    commit_shas: shas,
+    branch: branches.length ? cap(branches[0], CAP_PATH) : null,
     ...struct,
   };
 }
 
 // Build the parent's nested subagents[] (Claude-style). For each child of
-// `parentConversationId` (found by reverse parent-link): its agent_type (matched
-// from the parent's declared names), role, model, per-tool tool_uses breakdown +
-// total tool_use_count, semantic input/output tokens, and the child's session
-// window (started_at/ended_at/duration_ms from its own transcript). Numbers +
-// content-safe labels only. Returns [] if none / on any failure (never throws).
-function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
+// `parentConversationId` (found by reverse parent-link in the parent's own
+// store): its agent_type (matched from the parent's declared names, else the
+// store index's short agent_name label), role, model, per-tool tool_uses
+// breakdown + total tool_use_count, semantic input/output/cache-read tokens, the
+// child's session window (started_at/ended_at/duration_ms) and its own
+// commit_shas + branch (both from its own transcript). `store` (optional) is the
+// parent's resolved store. Numbers + content-safe labels only. Returns [] if none
+// / on any failure (never throws). The caller folds commit_shas into the
+// session-level commitSHA (foldSubagentShas).
+function buildAntigravitySubagents(parentTranscriptPath, parentConversationId, store) {
   try {
-    const children = agyTokens.findChildren(parentConversationId);
+    const s = store || agyTokens.resolveStore(parentConversationId, parentTranscriptPath);
+    const children = agyTokens.findChildren(parentConversationId, s);
     if (!children.length) return [];
     const { names, roleByName } = extractSubagentDecls(parentTranscriptPath);
     const out = [];
     for (const childId of children) {
-      const agentType = agyTokens.readAgentType(childId, names);
+      const agentType =
+        agyTokens.readAgentType(childId, names, s) || agyTokens.readSummaryAgentName(childId, s);
       // One combined gen_metadata read for both usage and model, instead of
       // readUsageInputOutput()+readModel() each re-opening/re-scanning the DB.
-      const gen = agyTokens.readGenMetadata(childId);
-      const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0 };
+      const gen = agyTokens.readGenMetadata(childId, s);
+      const usage = agyTokens.usageInputOutput(gen.usageRaw) || { input: 0, output: 0, cacheRead: 0 };
       const {
         tool_uses,
         tool_use_count,
         started_at,
         ended_at,
         duration_ms,
+        commit_shas,
+        branch,
         ...structFields // the 9-key structural line-count breakdown (counts only)
-      } = childStats(brainTranscriptPath(childId));
+      } = childStats(brainTranscriptPath(childId, s));
       out.push({
         agent_type: agentType ? cap(agentType, CAP_LABEL) : null,
         role: agentType && roleByName[agentType] ? roleByName[agentType] : null,
@@ -447,10 +564,13 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
         tool_use_count,
         input_tokens: usage.input,
         output_tokens: usage.output,
+        cache_read_tokens: usage.cacheRead,
         started_at,
         ended_at,
         duration_ms,
         ...structFields,
+        commit_shas,
+        branch,
       });
     }
     return out;
@@ -462,6 +582,9 @@ function buildAntigravitySubagents(parentTranscriptPath, parentConversationId) {
 module.exports = {
   accumulateFileChange,
   applyReplace,
+  newCommitTracker,
+  foldSubagentShas,
+  childStats,
   trimCommon,
   extractShasFromRunCommand,
   parseAntigravityTranscript,

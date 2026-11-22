@@ -176,7 +176,16 @@ test('findChildren reverse-scans the conversations dir', { skip: !nodeSqlite }, 
 test('readUsageInputOutput maps the semantic token paths', { skip: !nodeSqlite }, () => {
   withDir((dir) => {
     buildSyntheticDb(dir, 'u', { input: 1234, output: 567 });
-    assert.deepStrictEqual(tokens.readUsageInputOutput('u'), { input: 1234, output: 567 });
+    // no 1.4.5 in any row → cacheRead 0 (proto3 omits zero-valued varints)
+    assert.deepStrictEqual(tokens.readUsageInputOutput('u'), { input: 1234, output: 567, cacheRead: 0 });
+    buildSyntheticDb(dir, 'uc', {
+      rows: [
+        { input: 100, output: 10, cacheRead: 9000 },
+        { input: 50, output: 5, cacheRead: 9100 },
+      ],
+    });
+    assert.deepStrictEqual(tokens.readUsageInputOutput('uc'), { input: 150, output: 15, cacheRead: 18100 });
+    assert.strictEqual(tokens.readUsageRaw('uc')[tokens.USAGE_PATHS.cacheRead], 18100);
   });
 });
 
@@ -204,4 +213,40 @@ test('looksLikeTitle accepts single-line summaries, rejects body-text shapes', (
   assert.strictEqual(tokens.looksLikeTitle('const x = 1;\nfoo();'), false); // code body
   assert.strictEqual(tokens.looksLikeTitle('has\ttab'), false); // control char
   assert.strictEqual(tokens.looksLikeTitle(null), false);
+});
+
+// The latest generation's gen_metadata row also carries the model-context dump,
+// which pushes it past MAX_ROW_BYTES. Its USAGE must still be counted (skipping it
+// under-counted every conversation by its last turn), but nothing else in it: the
+// dump's varints must not leak into usage_raw and its text must not be scanned for
+// a model id.
+test('the oversized latest-generation row contributes its usage sub-message only', { skip: !nodeSqlite }, () => {
+  withDir((dir) => {
+    buildSyntheticDb(dir, 'conv-big', {
+      rows: [{ input: 1000, output: 100, cacheRead: 5000 }],
+      bigUsageRow: { input: 300, output: 30, cacheRead: 7000, dumpVarint: 8888888 },
+    });
+    const u = tokens.readUsageRaw('conv-big');
+    assert.strictEqual(u['1.4.2'], 1300);
+    assert.strictEqual(u['1.4.3'], 130);
+    assert.strictEqual(u['1.4.5'], 12000);
+    assert.ok(!Object.values(u).includes(8888888), 'context-dump varint leaked into usage_raw');
+    assert.ok(!Object.keys(u).some((k) => k.startsWith('1.7')), 'context-dump path walked');
+    assert.ok(!JSON.stringify(u).includes('BIG_ROW_DUMP_SECRET'));
+    assert.deepStrictEqual(tokens.usageInputOutput(u), { input: 1300, output: 130, cacheRead: 12000 });
+  });
+});
+
+test('a one-generation conversation (only a big row) gets usage + model from fixed paths, never the dump text', { skip: !nodeSqlite }, () => {
+  withDir((dir) => {
+    buildSyntheticDb(dir, 'conv-one', {
+      rows: [],
+      bigUsageRow: { input: 42, output: 7, model: 'gemini-3-pro-synthetic' },
+    });
+    const g = tokens.readGenMetadata('conv-one');
+    assert.deepStrictEqual(g.usageRaw, { '1.4.2': 42, '1.4.3': 7 });
+    // The dump repeats "claude-dump-decoy-model" hundreds of times; only the
+    // model id at the row's fixed path counts.
+    assert.strictEqual(g.model, 'gemini-3-pro-synthetic');
+  });
 });
