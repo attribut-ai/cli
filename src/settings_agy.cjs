@@ -11,6 +11,12 @@
 //   { "<hook-name>": { "<Event>": [ { "matcher": "*",
 //       "hooks": [ { "type": "command", "command": "…", "timeout": 30 } ] } ] } }
 //
+// That grouped shape is for the tool events (PreToolUse/PostToolUse). The other
+// events (SessionStart, PreInvocation, PostInvocation, Stop) are FLAT — a list of
+// handler objects directly, no matcher:
+//
+//   { "<hook-name>": { "Stop": [ { "type": "command", "command": "…", "timeout": 30 } ] } }
+//
 // Because we own a whole NAMED entry (default "attribut"), idempotency is trivial:
 // install replaces our named key in place; uninstall deletes it. Other named
 // hooks (user's / other tools') are preserved verbatim. We reuse settings.cjs's

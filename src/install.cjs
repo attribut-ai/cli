@@ -140,21 +140,29 @@ function buildHookCommand(mode, { collector, ingestBase, provider }) {
 
 /**
  * Build the agy hooks.json spec for our named hook (settings_agy merges it under
- * the AGY_HOOK_NAME key). v1 registers PostToolUse only — it is the one event
- * verified to fire AND pipe a JSON stdin payload (conversationId + transcriptPath)
- * in agy 1.0.8; Stop/SessionEnd fire but pipe nothing. The collector posts a
- * cumulative snapshot per fire and the server reconciles by sessionId.
+ * the AGY_HOOK_NAME key). Antigravity's events are SessionStart, PreToolUse,
+ * PostToolUse, PreInvocation, PostInvocation and Stop (no SessionEnd). We register:
+ *   - PostToolUse — GROUPED (`matcher` + `hooks` wrapper); "*" matches every tool.
+ *     A cumulative snapshot per tool step.
+ *   - Stop — FLAT (a list of handler objects; the matcher is ignored). Fires when
+ *     the execution loop terminates, so the final turn (which may call no tool)
+ *     is captured.
+ * Both pipe camelCase JSON on stdin (conversationId, transcriptPath,
+ * workspacePaths, hookEventName, …). Stop's stdin also carries `lastUserInput`
+ * (prompt text), which the collector never reads. Stop is synchronous and only a
+ * stdout `{"decision":"continue"}` blocks the stop: the collector writes nothing
+ * to stdout on the hook path and its POST timeout is bounded well under `timeout`.
+ * The server reconciles every snapshot by sessionId.
  */
 function buildAgyHookSpec({ collector, ingestBase }) {
-  const command = buildHookCommand('posttooluse', {
-    collector,
-    ingestBase,
-    provider: 'antigravity',
+  const handler = (mode) => ({
+    type: 'command',
+    command: buildHookCommand(mode, { collector, ingestBase, provider: 'antigravity' }),
+    timeout: 30,
   });
   return {
-    PostToolUse: [
-      { matcher: '*', hooks: [{ type: 'command', command, timeout: 30 }] },
-    ],
+    PostToolUse: [{ matcher: '*', hooks: [handler('posttooluse')] }],
+    Stop: [handler('stop')],
   };
 }
 
@@ -380,7 +388,7 @@ function runInstall(argv) {
       return 1;
     }
     if (applied.backupPath) out(`  Backed up previous hooks → ${applied.backupPath}`);
-    out(`Registered PostToolUse hook in ${applied.settingsPath}`);
+    out(`Registered PostToolUse + Stop hooks in ${applied.settingsPath}`);
     out(`  collector → ${collector}`);
     out(`  token     → ${tokenFile} (mode 0600)`);
     out('');
